@@ -1,0 +1,34 @@
+>>> [TemporalAnalyzer] Inicializado (GPU: True )
+>>> [FacialAnalyzer] MediaPipe FaceMesh 478pts cargado
+>>> [ForensicAnalyzer] Inicializado
+>>> [AudioAnalyzer] parselmouth disponible (Jitter/Shimmer/HNR)
+>>> [AudioAnalyzer] librosa disponible
+>>> [ViTEnsemble] Inicializando en cpu...
+>>> [ViTEnsemble] Cargando prithivMLmods/Deep-Fake-Detector-v2-Model...
+>>> [ViTEnsemble] Frame classifier listo (fake_idx=1, label='Deepfake')
+>>> [ViTEnsemble] Cargando MCG-NJU/videomae-base...
+>>> [ViTEnsemble] VideoMAE base cargado (modo latentes)
+>>> [TemporalAnalyzer] MediaPipe Pose cargado
+
+============================================================
+RESULTADO FINAL — VideoIADetector V4.1
+============================================================
+  Veredicto:       PROBABLEMENTE REAL
+  Probabilidad IA: 29.7%
+  Confianza:       40.7%
+  CI 80%:          [13.8% — 47.5%]
+  Modelo probable: Sora/T2V (67.0%)
+  Tiempo:          18.79s
+
+Razones:
+  • vit_ensemble (77%)
+
+Scores por módulo:
+  facial              : 25.4%
+  forensic            : 16.4%
+  audio               : 10.0%
+  vit_ensemble        : 77.0%
+  temporal            : 27.8%
+
+Contribuciones SHAP:
+  facial              : -0.007  

@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DECTECTAME ESTA | AI FORENSIC STATION</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;700&family=JetBrains+Mono&display=swap"
+        rel="stylesheet">
+    <script src="https://unpkg.com/wavesurfer.js@7"></script>
+    <style>
+        :root {
+            --accent: #ff0055;
+            --accent-hover: #ff3377;
+            --bg-primary: #0a0a0f;
+            --bg-secondary: rgba(15, 15, 20, 0.7);
+            --bg-tertiary: rgba(255, 255, 255, 0.03);
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0b0;
+            --text-muted: #505060;
+            --border: rgba(255, 0, 85, 0.3);
+            --success: #00ffcc;
+            --danger: #ff0055;
+            --radius: 4px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Space Grotesk', 'JetBrains Mono', sans-serif;
+            background-color: var(--bg-primary);
+            background-image:
+                linear-gradient(rgba(255, 0, 85, 0.05) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 0, 85, 0.05) 1px, transparent 1px);
+            background-size: 30px 30px;
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 16px;
+            margin: 0;
+            line-height: 1.5;
+            overflow-x: hidden;
+        }
+
+        body::after {
+            content: " ";
+            display: block;
+            position: fixed;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            z-index: 9999;
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+            opacity: 0.15;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 10;
+        }
+
+        .cool-title {
+            font-weight: 700;
+            letter-spacing: 4px;
+            color: var(--text-primary);
+            font-size: clamp(2rem, 6vw, 3rem);
+            text-align: center;
+            margin: 0 0 8px 0;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 0, 85, 0.5);
+            animation: glitch 3s infinite;
+        }
+
+        @keyframes glitch {
+            0% {
+                transform: translate(0)
+            }
+
+            2% {
+                transform: translate(-2px, 1px)
+            }
+
+            4% {
+                transform: translate(-1px, -1px)
+            }
+
+            6% {
+                transform: translate(2px, 1px)
+            }
+
+            8% {
+                transform: translate(0)
+            }
+
+            100% {
+                transform: translate(0)
+            }
+        }
+
+        .text-info {
+            color: var(--success) !important;
+            text-shadow: 0 0 8px rgba(0, 255, 204, 0.4);
+        }
+
+        .main-container {
+            background: var(--bg-secondary);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 40px;
+            box-shadow: 0 0 30px rgba(255, 0, 85, 0.1);
+            width: 100%;
+            position: relative;
+            overflow: hidden;
+            transition: border-color 0.5s ease;
+        }
+
+        .main-container::before,
+        .main-container::after {
+            content: '';
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--accent);
+            transition: all 0.3s ease;
+        }
+
+        .main-container::before {
+            top: 0;
+            left: 0;
+            border-right: none;
+            border-bottom: none;
+        }
+
+        .main-container::after {
+            bottom: 0;
+            right: 0;
+            border-left: none;
+            border-top: none;
+        }
+
+        .main-container:hover::before,
+        .main-container:hover::after {
+            width: 30px;
+            height: 30px;
+        }
+
+        .upload-area {
+            border: 1px dashed var(--text-muted);
+            border-radius: var(--radius);
+            padding: 50px 24px;
+            transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.3);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-area:hover {
+            border-color: var(--accent);
+            background: rgba(255, 0, 85, 0.05);
+            box-shadow: inset 0 0 20px rgba(255, 0, 85, 0.1);
+        }
+
+        .upload-area.drag-over {
+            border-color: var(--success);
+            background: rgba(0, 255, 204, 0.05);
+            transform: scale(1.02);
+        }
+
+        .upload-area svg {
+            width: 48px;
+            height: 48px;
+            stroke: var(--text-secondary);
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .upload-area:hover svg {
+            stroke: var(--accent);
+            transform: translateY(-5px);
+        }
+
+        .upload-area h4 {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            margin: 0 0 10px 0;
+            font-size: 1.1rem;
+            color: var(--text-primary);
+            letter-spacing: 2px;
+        }
+
+        .upload-area p {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin: 0;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .terminal-box {
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-left: 3px solid var(--accent);
+            border-radius: 0;
+            padding: 16px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--success);
+            height: 80px;
+            overflow-y: auto;
+            margin: 30px 0;
+            line-height: 1.6;
+            box-shadow: inset 0 0 10px rgba(0, 255, 204, 0.05);
+        }
+
+        .btn-scan {
+            background: transparent;
+            border: 1px solid var(--accent);
+            color: var(--accent);
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            padding: 16px 24px;
+            border-radius: 0;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            width: 100%;
+            cursor: pointer;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            position: relative;
+            overflow: hidden;
+            z-index: 1;
+        }
+
+        .btn-scan::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: var(--accent);
+            transform: scaleX(0);
+            transform-origin: left;
+            transition: transform 0.3s ease;
+            z-index: -1;
+        }
+
+        .btn-scan:hover:not(:disabled) {
+            color: #fff;
+            box-shadow: 0 0 20px rgba(255, 0, 85, 0.4);
+        }
+
+        .btn-scan:hover:not(:disabled)::before {
+            transform: scaleX(1);
+        }
+
+        .btn-scan:disabled {
+            opacity: 0.3;
+            pointer-events: none;
+            border-color: var(--text-muted);
+            color: var(--text-muted);
+        }
+
+        #verdict-text {
+            font-size: clamp(1.8rem, 6vw, 2.5rem);
+            font-weight: 700;
+            margin: 32px 0 24px;
+            text-align: center;
+            font-family: 'Space Grotesk', sans-serif;
+            letter-spacing: 2px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 0.8;
+            }
+
+            50% {
+                opacity: 1;
+                text-shadow: 0 0 20px currentColor;
+            }
+
+            100% {
+                opacity: 0.8;
+            }
+        }
+
+        .gauge-wrapper {
+            position: relative;
+            width: 100%;
+            max-width: 280px;
+            aspect-ratio: 2 / 1;
+            margin: 0 auto 30px;
+        }
+
+        .gauge-svg {
+            width: 100%;
+            height: auto;
+            display: block;
+            filter: drop-shadow(0 0 10px rgba(0, 255, 204, 0.3));
+        }
+
+        .needle-container {
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            width: 45%;
+            height: 2px;
+            transform-origin: left center;
+            transform: rotate(-90deg);
+            transition: transform 1.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            z-index: 10;
+        }
+
+        .needle {
+            width: 100%;
+            height: 100%;
+            background: #fff;
+            box-shadow: 0 0 8px #fff;
+        }
+
+        .gauge-bolt {
+            width: 16px;
+            height: 16px;
+            background: var(--bg-primary);
+            border: 2px solid #fff;
+            border-radius: 50%;
+            position: absolute;
+            bottom: -8px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 20;
+            box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+        }
+
+        #pct-text {
+            font-size: clamp(3rem, 10vw, 5rem);
+            font-weight: 700;
+            text-align: center;
+            margin: 0 0 32px;
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: -2px;
+            color: #fff;
+            text-shadow: 0 0 20px rgba(255, 255, 255, 0.2);
+        }
+
+        #tech-details {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin: 0 0 30px;
+        }
+
+        .tech-item {
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--text-muted);
+            padding: 12px 20px;
+            text-align: center;
+            min-width: 140px;
+        }
+
+        .tech-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .tech-value {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: var(--success);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        #verdict-note {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            text-align: center;
+            margin: 0 0 32px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .btn-outline-light {
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: 1px;
+            border-radius: 0 !important;
+            transition: all 0.3s ease;
+            border-color: rgba(255, 255, 255, 0.5);
+        }
+
+        .btn-outline-light:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            box-shadow: 0 0 15px rgba(255, 255, 255, 0.2);
+        }
+
+        #imgPreview,
+        #videoPreview {
+            width: 100%;
+            height: auto;
+            max-height: 300px;
+            object-fit: cover;
+            border: 1px solid var(--border);
+            margin: 20px 0;
+            display: block;
+            background: #000;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            animation: fadeIn 0.5s ease;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        #audioWrapper {
+            display: none;
+            width: 100%;
+            padding: 20px;
+            margin-top: 20px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(0, 255, 204, 0.2);
+        }
+
+        #waveform {
+            width: 100%;
+            height: 60px;
+        }
+
+        .play-btn {
+            background: none;
+            border: none;
+            color: var(--success);
+            font-size: 0.85rem;
+            font-weight: 700;
+            cursor: pointer;
+            margin-top: 15px;
+            padding: 8px 0;
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+        }
+
+        .play-btn:hover {
+            text-shadow: 0 0 8px var(--success);
+            transform: translateX(5px);
+        }
+
+        .scan-line {
+            position: absolute;
+            width: 100%;
+            height: 2px;
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent), 0 0 20px var(--accent);
+            top: 0;
+            left: 0;
+            display: none;
+            animation: scanLineAnim 2s linear infinite;
+            z-index: 5;
+        }
+
+        @keyframes scanLineAnim {
+            0% {
+                top: 0;
+                opacity: 0;
+            }
+
+            10% {
+                opacity: 1;
+            }
+
+            90% {
+                opacity: 1;
+            }
+
+            100% {
+                top: 100%;
+                opacity: 0;
+            }
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-primary);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--text-muted);
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--accent);
+        }
+
+        @media (max-width: 480px) {
+            .main-container {
+                padding: 24px;
+                border-width: 1px 0;
+                border-radius: 0;
+            }
+
+            .upload-area {
+                padding: 30px 16px;
+            }
+
+            #pct-text {
+                font-size: 2.5rem;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container text-center">
+        <header class="mb-4">
+            <h1 class="cool-title mb-0">DETECTAME ESTA</h1>
+            <p class="text-info small" style="letter-spacing: 8px;">FORENSIC AI ANALYZER</p>
+        </header>
+
+        <div class="main-container col-lg-8 mx-auto shadow-lg" id="mainPanel">
+            <div id="ui-upload">
+                <div class="upload-area mb-4" id="dropZone">
+                    <div class="scan-line" id="scanner"></div>
+                    <div id="uploadContent">
+                        <div class="mb-3">
+                            <svg width="50" height="50" viewBox="0 0 24 24" fill="none" stroke="var(--primary)"
+                                stroke-width="1.5">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="17 8 12 3 7 8"></polyline>
+                                <line x1="12" y1="3" x2="12" y2="15"></line>
+                            </svg>
+                        </div>
+                        <h4 class="fw-bold mb-1">INSERTAR EVIDENCIA</h4>
+                        <p class="text-secondary">Haz clic o arrastra video/imagen/audio</p>
+                    </div>
+                    <img id="imgPreview" class="d-none">
+                    <video id="videoPreview" controls class="d-none" onclick="event.stopPropagation()"></video>
+
+                    <div id="audioWrapper" onclick="event.stopPropagation()">
+                        <div id="waveform"></div>
+                        <p class="text-info small mt-2" style="cursor:pointer; font-family:'JetBrains Mono'"
+                            id="playBtn">▶ REPRODUCIR AUDIO</p>
+                    </div>
+                </div>
+
+                <div class="terminal-box mb-4" id="terminalLog">
+                    > SISTEMA NEURO-FORENSE LISTO...<br>> ESPERANDO BUFFER DE ENTRADA...
+                </div>
+
+                <input type="file" id="fileInput" hidden accept="image/*,video/*,audio/*">
+                <button class="btn btn-scan w-100" id="scanBtn">EJECUTAR ESCANEO</button>
+            </div>
+
+            <div id="ui-result" class="d-none">
+                <div id="verdict-text" class="mb-2">ANALIZANDO...</div>
+
+                <div class="gauge-wrapper mb-4">
+                    <svg class="gauge-svg" viewBox="0 0 200 120">
+                        <defs>
+                            <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#00ffcc" />
+                                <stop offset="50%" stop-color="#ffcc00" />
+                                <stop offset="100%" stop-color="#ff4444" />
+                            </linearGradient>
+                        </defs>
+                        <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#222" stroke-width="18"
+                            stroke-linecap="round" />
+                        <path id="gaugePathFill" d="M 20 100 A 80 80 0 0 1 180 100" fill="none"
+                            stroke="url(#gaugeGradient)" stroke-width="18" stroke-linecap="round"
+                            stroke-dasharray="0 251.3" style="transition: stroke-dasharray 3s ease-out;" />
+                    </svg>
+                    <div class="needle-container" id="needleBox">
+                        <div class="needle"></div>
+                    </div>
+                    <div class="gauge-bolt"></div>
+                </div>
+
+                <h1 class="display-3 fw-bold mb-1" id="pct-text">0%</h1>
+
+                <div id="tech-details" class="mt-4 mb-4 d-none">
+                    <div class="row g-2 justify-content-center"
+                        style="font-family: 'JetBrains Mono'; font-size: 0.75rem;">
+                        <div class="col-5 border border-info border-opacity-25 p-2 rounded bg-black bg-opacity-50">
+                            <span class="text-secondary d-block" style="font-size: 0.6rem;">VOZ HUMANA (REAL)</span>
+                            <span id="val-human" class="text-info fw-bold">---</span>
+                        </div>
+                        <div class="col-5 border border-danger border-opacity-25 p-2 rounded bg-black bg-opacity-50">
+                            <span class="text-secondary d-block" style="font-size: 0.6rem;">VOZ SINTÉTICA (IA)</span>
+                            <span id="val-ai" class="text-danger fw-bold">---</span>
+                        </div>
+                    </div>
+                </div>
+
+                <p id="verdict-note" class="h5 text-secondary mb-5"></p>
+                <button class="btn btn-outline-light px-5 py-2" onclick="location.reload()"
+                    style="border-radius: 10px;">NUEVA CARGA</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let wavesurfer;
+        const fileInput = document.getElementById('fileInput'),
+            dropZone = document.getElementById('dropZone'),
+            terminal = document.getElementById('terminalLog'),
+            scanBtn = document.getElementById('scanBtn');
+
+        function addLog(t) {
+            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            terminal.innerHTML += `<br>> [${time}] ${t}`;
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(n => {
+            dropZone.addEventListener(n, e => { e.preventDefault(); e.stopPropagation(); });
+        });
+        dropZone.addEventListener('dragover', () => dropZone.classList.add('drag-over'));
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+        dropZone.addEventListener('drop', e => {
+            dropZone.classList.remove('drag-over');
+            handleFile(e.dataTransfer.files[0]);
+        });
+
+        dropZone.onclick = (e) => {
+            if (e.target.tagName !== 'VIDEO' && !e.target.closest('#audioWrapper')) fileInput.click();
+        };
+        fileInput.onchange = () => handleFile(fileInput.files[0]);
+
+        function handleFile(file) {
+            if (!file) return;
+            const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files;
+            document.getElementById('uploadContent').classList.add('d-none');
+            const url = URL.createObjectURL(file);
+
+            document.getElementById('imgPreview').classList.add('d-none');
+            document.getElementById('videoPreview').classList.add('d-none');
+            document.getElementById('audioWrapper').style.display = 'none';
+            if (wavesurfer) wavesurfer.destroy();
+
+            addLog(`EVIDENCIA CARGADA: ${file.name.toUpperCase()}`);
+
+            if (file.type.startsWith('image/')) {
+                const img = document.getElementById('imgPreview'); img.src = url; img.classList.remove('d-none');
+            } else if (file.type.startsWith('video/')) {
+                const vid = document.getElementById('videoPreview'); vid.src = url; vid.classList.remove('d-none');
+            } else if (file.type.startsWith('audio/')) {
+                const wrapper = document.getElementById('audioWrapper');
+                wrapper.style.display = 'block';
+
+                wavesurfer = WaveSurfer.create({
+                    container: '#waveform',
+                    waveColor: 'rgba(0, 255, 204, 0.2)',
+                    progressColor: '#00ffcc',
+                    cursorColor: '#ff0055',
+                    barWidth: 3,
+                    barGap: 2,
+                    barRadius: 2,
+                    height: 60
+                });
+                wavesurfer.load(url);
+                document.getElementById('playBtn').onclick = () => wavesurfer.playPause();
+            }
+        }
+
+        scanBtn.onclick = async () => {
+            if (!fileInput.files[0]) return alert("Carga un archivo.");
+            document.getElementById('scanner').style.display = "block";
+            scanBtn.disabled = true;
+            addLog("EXTRAYENDO PATRONES NEURONALES...");
+
+            const fd = new FormData(); fd.append('file', fileInput.files[0]);
+            try {
+                const res = await fetch('http://127.0.0.1:8000/analizar', { method: 'POST', body: fd });
+                const data = await res.json();
+
+                setTimeout(() => {
+                    document.getElementById('ui-upload').classList.add('d-none');
+                    document.getElementById('ui-result').classList.remove('d-none');
+
+                    const prob = data.probabilidad;
+                    const vText = document.getElementById('verdict-text');
+
+                    // Lógica de Veredicto
+                    if (prob > 50) {
+                        vText.innerText = "GENERADO POR IA";
+                        vText.style.color = "var(--danger)";
+                        vText.style.textShadow = "0 0 15px var(--danger)";
+                    } else {
+                        vText.innerText = "ORIGEN HUMANO";
+                        vText.style.color = "var(--success)";
+                        vText.style.textShadow = "0 0 15px var(--success)";
+                    }
+
+                    // Llenado de Datos Técnicos (Nuevo)
+                    if (data.detalles && data.detalles.predicciones) {
+                        document.getElementById('tech-details').classList.remove('d-none');
+                        // Mostramos los valores que nos da el modelo Hemgg
+                        document.getElementById('val-human').innerText = data.detalles.predicciones['HumanVoice'] || "0%";
+                        document.getElementById('val-ai').innerText = data.detalles.predicciones['AIVoice'] || "0%";
+                        addLog(`TELEMETRÍA: IA ${data.detalles.predicciones['AIVoice']} | HUMANO ${data.detalles.predicciones['HumanVoice']}`);
+                    }
+
+                    const rot = (prob * 180) / 100 - 180;
+                    document.getElementById('needleBox').style.transform = `rotate(${rot}deg)`;
+                    const fill = document.getElementById('gaugePathFill');
+                    fill.style.strokeDasharray = `${(prob * 251.3) / 100} 251.3`;
+
+                    document.getElementById('pct-text').innerText = prob + "% IA";
+                    document.getElementById('verdict-note').innerText = data.nota;
+
+                    if (prob > 70) document.getElementById('mainPanel').style.borderColor = "var(--danger)";
+
+                    addLog("ANÁLISIS COMPLETADO.");
+                }, 2000);
+            } catch (e) {
+                addLog("ERROR CRÍTICO: CONEXIÓN PERDIDA.");
+                scanBtn.disabled = false;
+                document.getElementById('scanner').style.display = "none";
+            }
+        };
+    </script>
+</body>
+
+</html>
