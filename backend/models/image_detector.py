@@ -1,1046 +1,2456 @@
-import cv2
-import numpy as np
+import base64
 import io
-import torch
-import time
-import concurrent.futures
+import hashlib
 import logging
+import warnings
+import concurrent.futures
+from collections import OrderedDict
+from dataclasses import dataclass
+from threading import Lock
+from typing import Dict, Any, List, Optional, Tuple
+
+import numpy as np
+import torch
+import cv2
 from PIL import Image
 from PIL.ExifTags import TAGS
 from transformers import pipeline
-import open_clip
-import warnings
-import functools
 
-warnings.filterwarnings("ignore", category=UserWarning)
-logging.basicConfig(level=logging.WARNING, format='[%(levelname)s] %(message)s')
-logger = logging.getLogger(__name__)
+try:
+    import open_clip
+except ImportError:
+    open_clip = None
+
+warnings.filterwarnings("ignore")
+import os
+os.environ["HF_HUB_READ_TIMEOUT"] = "60"  # [PROD] V10.3: Aumentar timeout para evitar crash en arranque
+os.environ["TRANSFORMERS_OFFLINE"] = "0"   # Permitir descarga si es necesario, pero priorizar cache
+logger = logging.getLogger("NueroscanV10")
+
+# Silenciar logs ruidosos de bibliotecas externas
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+
+import transformers
+transformers.utils.logging.set_verbosity_warning()
+
+_MAX_IMAGE_BYTES  = 50 * 1024 * 1024   # 50 MB raw bytes
+_MAX_IMAGE_PIXELS = 4096 * 4096        # ~16 Mpx
+
+# ═══════════════════════════════════════════════════════════════
+# RESOLUCIONES NATIVAS DE GENERADORES IA
+# Clave para identificar imágenes sin metadata: los generadores
+# producen dimensiones fijas o múltiplos exactos de sus latent spaces.
+# ═══════════════════════════════════════════════════════════════
+_AI_NATIVE_RESOLUTIONS: List[Tuple[int, int]] = [
+    # SD 1.x / 2.x (latent 64px)
+    (512, 512), (512, 768), (768, 512), (768, 768),
+    (512, 896), (896, 512), (640, 640),
+    # SDXL / Flux (latent 128px)
+    (1024, 1024), (1024, 768), (768, 1024),
+    (1344, 768), (768, 1344), (1152, 896), (896, 1152),
+    (1216, 832), (832, 1216), (1344, 704), (704, 1344),
+    (1536, 640), (640, 1536),
+    # DALL-E 3
+    (1024, 1024), (1792, 1024), (1024, 1792),
+    # Midjourney (múltiplos de 64)
+    (1456, 816), (816, 1456), (1232, 928),
+    # Grok/Aurora (V1 + V2 + Aurora 2)
+    (1024, 1024), (1366, 768), (1280, 720),
+    (2048, 2048), (1536, 1024), (1024, 1536),
+    (1536, 1536), (2048, 1024), (1024, 2048),
+    (1280, 1280), (1920, 1080), (1080, 1920),
+    # Gemini Imagen 3
+    (1536, 1536), (2048, 2048), (1024, 1024),
+    # Ideogram V2/V3 / Playground V3
+    (1024, 1024), (1080, 1080), (1344, 768), (768, 1344),
+]
+_AI_NATIVE_RESOLUTIONS_SET = set(_AI_NATIVE_RESOLUTIONS)
 
 
-class NueroscanEngineV5:
-    def __init__(self, config=None):
-        self.config = config or {
-            "grok_threshold": 25,           # antes: 50 — más sensible a firma Aurora
-            "texture_thresholds": (12, 18),
-            "noise_thresholds": (18, 28, 180),
-            "fft_thresholds": (0.55, 0.70),
-            "symmetry_threshold": 3.5,
-            "rolloff_thresholds": (8.0, 12.0),
-            "entropy_threshold": 100,
-            "color_var_threshold": 500,
-            "ela_threshold": 50,
-            "srm_threshold": 3.0,
-            "min_face_size": 50,
-            # Pesos del ensemble adaptativo
-            "model_weights": {"detector1": 0.35, "detector2": 0.35, "clip": 0.30},
-            # Pesos del ensemble final (neural, forensic, grok)
-            "ensemble_weights": {"neural": 0.25, "forensic": 0.45, "grok": 0.30},
-            # Umbral bajo el que los neural models se consideran «poco fiables»
-            "neural_unreliable_threshold": 60.0,
-        }
+# ═══════════════════════════════════════════════════════════════
+# CONFIGURACIÓN CENTRALIZADA
+# ═══════════════════════════════════════════════════════════════
+@dataclass
+class ThresholdConfig:
+    # ── Veredicto ────────────────────────────────────────────────
+    prior_bias: float              = 1.0
+    verdict_ai_threshold: float    = 60.0   # V10.3 Standard Pulzo
+    verdict_real_threshold: float  = 20.0   
 
-        # Optimización GPU: fp16 ahorra ~50% VRAM
-        self.device = 0 if torch.cuda.is_available() else -1
-        self.torch_dtype = torch.float16 if self.device == 0 else torch.float32
-        self._models_cache = {}
+    # ── Laplaciano ───────────────────────────────────────────────
+    laplacian_ai_max: float           = 80.0
+    laplacian_professional_min: float = 800.0
+    laplacian_weight: float           = 30.0
 
-        print(">>> Iniciando Nueroscan Engine V5 (Optimized Enterprise Edition) ...")
+    # ── Ruido ────────────────────────────────────────────────────
+    noise_ai_max: float   = 1.2
+    noise_weight: float   = 30.0
 
-        self.detector1 = self._load_model("Organika/sdxl-detector")
-        self.detector2 = self._load_model("umm-maybe/AI-image-detector")
-        self.detector3 = self._load_model("Falcons/ai-vs-real-image-classifier")
+    # ── ELA ──────────────────────────────────────────────────────
+    ela_quality: int             = 95
+    ela_region_std_ai_max: float = 4.5
+    ela_mean_ai_min: float       = 8.0
+    ela_weight: float            = 40.0
 
-        self._load_clip()
+    # ── Color (Grok / DALL-E) ────────────────────────────────────
+    grok_sat_max: float  = 180.0
+    grok_val_max: float  = 230.0
+    grok_weight: float   = 25.0
 
-        self.face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
+    # ── Grok/Aurora — detector específico ────────────────────────
+    # V10.1: re-calibrados — más abiertos que V9 pero protegidos por
+    # el requisito mandatorio de ausencia de EXIF
+    grok_noise_max: float              = 1.8
+    grok_shadow_entropy_max: float     = 3.5
+    grok_gradient_smoothness_max: float = 10.0
+    grok_dct_uniformity_max: float     = 30.0
+    grok_min_conditions: int           = 3     # V10.2: protegido por EXIF shield, seguro en 3
 
-        print(">>> Sistema V5 listo y optimizado.")
+    # ── Shadow Entropy ───────────────────────────────────────────
+    shadow_entropy_ai_max: float   = 1.1
+    shadow_entropy_real_min: float = 2.5
+    shadow_entropy_weight: float   = 35.0
 
-    # ─────────────────────────────────────────────
-    # CARGA DE MODELOS (OPTIMIZADA)
-    # ─────────────────────────────────────────────
+    # ── FFT ──────────────────────────────────────────────────────
+    fft_ai_min: float  = 0.32
+    fft_weight: float  = 35.0
 
-    def _load_model(self, model_path):
+    # ── Aberración cromática (señal de cámara real) ───────────────
+    ca_ai_max: float   = 0.35
+    ca_weight: float   = 25.0
+
+    # ── Entropía local de textura ─────────────────────────────────
+    local_entropy_ai_max: float = 4.2
+    local_entropy_weight: float = 20.0
+
+    # ── V10: Simetría bilateral (IA produce simetría antinatural) ─
+    bilateral_symmetry_ai_min: float = 0.85
+    bilateral_symmetry_weight: float = 20.0
+
+    # ── V10: Clustering de paleta de color ────────────────────────
+    # Grok/Flux usan paletas estrechas con pocos clusters dominantes
+    color_cluster_ai_max: int   = 6      # ≤6 clusters dominantes → IA
+    color_cluster_weight: float = 20.0
+
+    # ── V10: FFT mid-band ringing (upsampler artifacts) ──────────
+    fft_midband_ring_min: float = 1.5
+    fft_midband_ring_weight: float = 25.0
+
+    # ── V10: Varianza de bordes por cuadrante ─────────────────────
+    edge_variance_ratio_ai_max: float = 1.3  # IA: varianza uniforme
+    edge_variance_weight: float = 15.0
+
+    # ── Metadata ─────────────────────────────────────────────────
+    metadata_confirmed_ai_weight: float  = 95.0
+    metadata_c2pa_unsigned_weight: float = 20.0
+    metadata_real_camera_weight: float   = -75.0
+
+
+# ═══════════════════════════════════════════════════════════════
+# CACHÉ LRU THREAD-SAFE
+# ═══════════════════════════════════════════════════════════════
+class _LRUCache:
+    def __init__(self, maxsize: int = 200):
+        self._data: OrderedDict = OrderedDict()
+        self._maxsize = maxsize
+        self._lock = Lock()
+
+    def get(self, key):
+        with self._lock:
+            if key not in self._data:
+                return None
+            self._data.move_to_end(key)
+            return self._data[key]
+
+    def set(self, key, value):
+        with self._lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+            self._data[key] = value
+            if len(self._data) > self._maxsize:
+                self._data.popitem(last=False)
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+
+
+# ═══════════════════════════════════════════════════════════════
+# MÓDULO 1: EXTRACCIÓN DE SEÑALES UNIVERSALES
+# ═══════════════════════════════════════════════════════════════
+class UniversalFeatureExtractor:
+    """
+    Extrae 12 biometrías forenses resistentes a compresión JPEG.
+
+    Nuevas en V9:
+      10. Aberración cromática lateral (CA) — cámaras reales la tienen, IA no.
+      11. Entropía local de textura — IA produce texturas demasiado uniformes.
+      12. Varianza de gradiente por canal — detecta la firma de suavizado de IA.
+    """
+
+    @staticmethod
+    def extract(gray: np.ndarray, img_cv: np.ndarray) -> Dict[str, Any]:
+        features: Dict[str, Any] = {}
+        h, w = gray.shape
+
+        # 1. Ruido Residual
         try:
-            return pipeline(
-                "image-classification",
-                model=model_path,
-                device=self.device,
-                torch_dtype=self.torch_dtype,  # ~50% menos VRAM en GPU
-            )
+            blur = cv2.GaussianBlur(gray.astype(np.float32), (7, 7), 0)
+            diff = np.abs(gray.astype(np.float32) - blur)
+            mask = diff < 5.0
+            features["noise_level"] = float(np.std(diff[mask])) if mask.sum() > 100 else None
         except Exception as e:
-            logger.error(f"Error cargando {model_path}: {e}")
-            return None
+            logger.debug(f"Fallo al calcular noise_level: {e}")
+            features["noise_level"] = None
 
-    def _load_clip(self):
+        # 2. Varianza Laplaciana
         try:
-            precision = "fp16" if self.device == 0 else "fp32"
-            self.clip_model, _, self.clip_preprocess = open_clip.create_model_and_transforms(
-                "ViT-B-32", pretrained="laion2b_s34b_b79k", precision=precision
-            )
-            if self.device == 0:
-                self.clip_model = self.clip_model.to("cuda")
-            self.clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
-            print(">>> Módulo CLIP cargado en alta eficiencia.")
+            lap = cv2.Laplacian(gray, cv2.CV_64F)
+            features["laplacian_var"] = float(np.var(lap))
         except Exception as e:
-            logger.error(f"Error cargando CLIP: {e}")
-            self.clip_model = None
+            logger.debug(f"Fallo al calcular laplacian_var: {e}")
+            features["laplacian_var"] = None
 
-    # ─────────────────────────────────────────────
-    # METADATA / EXIF
-    # ─────────────────────────────────────────────
-
-    def _check_exif(self, img_pil):
-        has_real = False
-        has_ai = False
+        # 3. FFT High-Frequency Ratio
         try:
-            exif_data = (
-                img_pil.getexif()
-                if hasattr(img_pil, "getexif")
-                else getattr(img_pil, "_getexif", lambda: None)()
+            mag = np.abs(np.fft.fftshift(np.fft.fft2(gray.astype(float))))
+            cy, cx = h // 2, w // 2
+            r = np.sqrt(
+                (np.ogrid[:h, :w][0] - cy) ** 2 + (np.ogrid[:h, :w][1] - cx) ** 2
             )
-            if not exif_data:
-                return False, False
+            mid_freq  = np.mean(mag[(r > min(h, w) * 0.10) & (r < min(h, w) * 0.30)])
+            high_freq = np.mean(mag[(r > min(h, w) * 0.40) & (r < min(h, w) * 0.48)])
+            features["fft_ratio"] = float(high_freq / (mid_freq + 1e-5))
+        except Exception as e:
+            logger.debug(f"Fallo al calcular fft_ratio: {e}")
+            features["fft_ratio"] = None
 
-            optical_tags = {
-                "ExposureTime", "FNumber", "ISOSpeedRatings",
-                "FocalLength", "LensModel", "ShutterSpeedValue",
-                "ApertureValue", "MeteringMode", "Flash",
-            }
-            # ── Grok/Aurora añade "xai" o "aurora" en Software/Comment ──
-            ai_keywords = [
-                "midjourney", "stable diffusion", "dall-e",
-                "ai generated", "comfyui", "firefly", "imagen",
-                "artificial intelligence", "generative",
-                "xai", "aurora", "grok", "flux", "ideogram",
+        # 4. Homogeneidad de color
+        try:
+            hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
+            features["saturation_var"]  = float(np.var(hsv[:, :, 1]))
+            features["value_var"]       = float(np.var(hsv[:, :, 2]))
+            features["saturation_mean"] = float(np.mean(hsv[:, :, 1]))
+        except Exception as e:
+            logger.debug(f"Fallo al calcular homogeneidad de color: {e}")
+            features["saturation_var"]  = None
+            features["value_var"]       = None
+            features["saturation_mean"] = None
+
+        # 5. Consistencia global por bloques
+        try:
+            step_h, step_w = max(1, h // 4), max(1, w // 4)
+            blocks = [
+                np.var(gray[i:min(i + step_h, h), j:min(j + step_w, w)])
+                for i in range(0, h, step_h)
+                for j in range(0, w, step_w)
             ]
+            features["block_consistency_std"] = float(np.std(blocks)) if blocks else None
+        except Exception as e:
+            logger.debug(f"Fallo al calcular block_consistency_std: {e}")
+            features["block_consistency_std"] = None
 
-            optical_count = 0
-            for tag, value in exif_data.items():
-                decoded = TAGS.get(tag, tag)
-                val = str(value).lower()
-                if decoded in optical_tags:
-                    optical_count += 1
-                if any(x in val for x in ai_keywords):
-                    has_ai = True
+        # 6. Distribución de histograma
+        try:
+            hist, _ = np.histogram(gray, bins=256, range=(0, 255))
+            features["hist_smoothness"] = float(np.std(hist))
+        except Exception as e:
+            logger.debug(f"Fallo al calcular hist_smoothness: {e}")
+            features["hist_smoothness"] = None
 
-            if optical_count >= 3:
-                has_real = True
+        # 7. Shadow Entropy
+        try:
+            shadow_mask = gray < 30
+            if shadow_mask.sum() > 50:
+                hist_s, _ = np.histogram(gray[shadow_mask], bins=30, range=(0, 30))
+                p_s = hist_s / (hist_s.sum() + 1e-8)
+                p_s = p_s[p_s > 0]
+                features["shadow_entropy"] = float(-np.sum(p_s * np.log2(p_s)))
+            else:
+                features["shadow_entropy"] = None
+        except Exception as e:
+            logger.debug(f"Fallo al calcular shadow_entropy: {e}")
+            features["shadow_entropy"] = None
 
+        # 8. Gradiente sintético (Grok/Aurora)
+        try:
+            bh_g, bw_g = max(1, h // 8), max(1, w // 8)
+            grad_scores = []
+            for i in range(8):
+                for j in range(8):
+                    blk = gray[i*bh_g:(i+1)*bh_g, j*bw_g:(j+1)*bw_g].astype(float)
+                    if blk.size < 16:
+                        continue
+                    dx = np.diff(blk, axis=1)
+                    dy = np.diff(blk, axis=0)
+                    grad_scores.append(float(np.var(dx) + np.var(dy)))
+            features["gradient_smoothness"] = float(np.median(grad_scores)) if grad_scores else None
+        except Exception as e:
+            logger.debug(f"Fallo al calcular gradient_smoothness: {e}")
+            features["gradient_smoothness"] = None
+
+        # 9. Uniformidad DCT (Grok primera generación JPEG)
+        try:
+            bms = []
+            for i in range(0, h - 8, 8):
+                for j in range(0, w - 8, 8):
+                    bms.append(float(np.std(gray[i:i+8, j:j+8].astype(float))))
+            features["dct_block_uniformity"] = float(np.std(bms)) if bms else None
+        except Exception as e:
+            logger.debug(f"Fallo al calcular dct_block_uniformity: {e}")
+            features["dct_block_uniformity"] = None
+
+        # 10. ABERRACIÓN CROMÁTICA LATERAL
+        try:
+            b_ch, g_ch, r_ch = cv2.split(img_cv)
+            edges_r = cv2.Canny(r_ch, 40, 120).astype(np.float32)
+            edges_b = cv2.Canny(b_ch, 40, 120).astype(np.float32)
+            if edges_r.sum() > 100 and edges_b.sum() > 100:
+                shifted = np.roll(edges_b, 1, axis=1)
+                diff_rb = float(np.mean(np.abs(edges_r - shifted)))
+                orig_rb = float(np.mean(np.abs(edges_r - edges_b)))
+                ca_score = diff_rb / (orig_rb + 1e-5)
+                features["chromatic_aberration"] = float(np.clip(ca_score, 0.0, 5.0))
+            else:
+                features["chromatic_aberration"] = None
+        except Exception as e:
+            logger.debug(f"Fallo al calcular aberración cromática: {e}")
+            features["chromatic_aberration"] = None
+
+        # 11. ENTROPÍA LOCAL DE TEXTURA
+        try:
+            patch_entropies = []
+            ph, pw = 8, 8
+            for i in range(0, h - ph, ph * 2):
+                for j in range(0, w - pw, pw * 2):
+                    patch = gray[i:min(i+ph, h), j:min(j+pw, w)]
+                    hist_p, _ = np.histogram(patch, bins=16, range=(0, 255))
+                    total = hist_p.sum()
+                    if total > 0:
+                        p = hist_p[hist_p > 0] / total
+                        patch_entropies.append(float(-np.sum(p * np.log2(p))))
+            features["local_texture_entropy"] = float(np.mean(patch_entropies)) if patch_entropies else None
+        except Exception as e:
+            logger.debug(f"Fallo al calcular local_texture_entropy: {e}")
+            features["local_texture_entropy"] = None
+
+        # 12. VARIANZA INTER-CANAL
+        try:
+            b_ch, g_ch, r_ch = cv2.split(img_cv)
+            var_r = float(np.var(cv2.Laplacian(r_ch, cv2.CV_64F)))
+            var_g = float(np.var(cv2.Laplacian(g_ch, cv2.CV_64F)))
+            var_b = float(np.var(cv2.Laplacian(b_ch, cv2.CV_64F)))
+            g_dominance = var_g / (((var_r + var_b) / 2.0) + 1e-5)
+            features["green_channel_dominance"] = float(np.clip(g_dominance, 0.0, 10.0))
+        except Exception as e:
+            logger.debug(f"Fallo al calcular green_channel_dominance: {e}")
+            features["green_channel_dominance"] = None
+
+        # 13. SIMETRÍA BILATERAL
+        try:
+            left_half  = gray[:, :w // 2]
+            right_half = np.fliplr(gray[:, w // 2: w // 2 * 2])
+            min_w = min(left_half.shape[1], right_half.shape[1])
+            if min_w > 16:
+                left_flat  = left_half[:, :min_w].ravel().astype(np.float64)
+                right_flat = right_half[:, :min_w].ravel().astype(np.float64)
+                lm, rm = left_flat.mean(), right_flat.mean()
+                ld, rd = left_flat - lm, right_flat - rm
+                denom = (np.sqrt(np.sum(ld**2)) * np.sqrt(np.sum(rd**2))) + 1e-8
+                corr = float(np.sum(ld * rd) / denom)
+                features["bilateral_symmetry"] = float(np.clip(corr, -1.0, 1.0))
+            else:
+                features["bilateral_symmetry"] = None
+        except Exception as e:
+            logger.debug(f"Fallo al calcular bilateral_symmetry: {e}")
+            features["bilateral_symmetry"] = None
+
+        # 14. CLUSTERING DE PALETA DE COLOR
+        try:
+            hsv_flat = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(np.float32)
+            n_samples = min(len(hsv_flat), 10000)
+            rng = np.random.default_rng(42)
+            sample = hsv_flat[rng.choice(len(hsv_flat), n_samples, replace=False)]
+            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+            K = 12
+            _, labels, centers = cv2.kmeans(sample, K, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
+            counts = np.bincount(labels.ravel(), minlength=K)
+            dominant = int(np.sum(counts > n_samples * 0.05))
+            features["color_cluster_count"] = dominant
+            hue_range = float(np.ptp(centers[:, 0]))
+            features["color_hue_spread"] = hue_range
+        except Exception as e:
+            logger.debug(f"Fallo al calcular color_clustering: {e}")
+            features["color_cluster_count"] = None
+            features["color_hue_spread"] = None
+
+        # 15. FFT MID-BAND RINGING
+        try:
+            mag = np.abs(np.fft.fftshift(np.fft.fft2(gray.astype(float))))
+            cy, cx = h // 2, w // 2
+            r = np.sqrt(
+                (np.arange(h)[:, None] - cy) ** 2 +
+                (np.arange(w)[None, :] - cx) ** 2
+            )
+            r_max = min(h, w) / 2.0
+            mid_mask = (r > r_max * 0.15) & (r < r_max * 0.35)
+            mid_vals = mag[mid_mask]
+            if mid_vals.size > 100:
+                mid_peak = float(np.percentile(mid_vals, 98))
+                mid_mean = float(np.mean(mid_vals))
+                features["fft_midband_ring"] = float(mid_peak / (mid_mean + 1e-5))
+            else:
+                features["fft_midband_ring"] = None
+        except Exception as e:
+            logger.debug(f"Fallo al calcular fft_midband_ring: {e}")
+            features["fft_midband_ring"] = None
+
+        # 16. VARIANZA DE BORDES POR CUADRANTE
+        try:
+            edges_full = cv2.Canny(gray, 30, 100).astype(np.float32)
+            qh, qw = h // 2, w // 2
+            quad_densities = [
+                float(edges_full[:qh, :qw].mean()) if edges_full[:qh, :qw].size > 0 else 0.0,
+                float(edges_full[:qh, qw:].mean()) if edges_full[:qh, qw:].size > 0 else 0.0,
+                float(edges_full[qh:, :qw].mean()) if edges_full[qh:, :qw].size > 0 else 0.0,
+                float(edges_full[qh:, qw:].mean()) if edges_full[qh:, qw:].size > 0 else 0.0,
+            ]
+            q_mean = np.mean(quad_densities) + 1e-5
+            q_std = np.std(quad_densities)
+            features["edge_quad_ratio"] = float(q_std / q_mean)
+        except Exception as e:
+            logger.debug(f"Fallo al calcular edge_quad_ratio: {e}")
+            features["edge_quad_ratio"] = None
+
+        return features
+
+
+# ═══════════════════════════════════════════════════════════════
+# MÓDULO 3: ANALIZADOR DE METADATA
+# ═══════════════════════════════════════════════════════════════
+class MetadataAnalyzer:
+    """
+    Extrae señales de procedencia desde metadatos embebidos.
+    Cobertura: EXIF, PNG chunks, XMP, C2PA/JUMBF, escaneo binario.
+    """
+
+    _AI_SIGNATURES: Dict[str, List[str]] = {
+        # ── Grandes plataformas ──────────────────────────────────────────
+        "Grok/Aurora":          [
+            "aurora", "xai", "grok", "x.ai", "grok-aurora", "aurora-model",
+            "xai-image", "grok image", "generated by grok", "aurora diffusion",
+            "xai aurora", "image created by x", "created with grok",
+        ],
+        "Gemini/Imagen":        [
+            "google imagen", "synthid", "gemini", "google deepmind", "imagegeneration",
+            "google llc", "google ai", "imagen2", "imagen3",
+            "parti", "muse model", "phenaki",
+        ],
+        "DALL-E":               [
+            "dall-e", "dall·e", "openai", "dall_e", "openai api", "dalle3", "dalle2",
+        ],
+        "Midjourney":           [
+            "midjourney", "nijijourney", "mj v", "mjv",
+            "midjourney v5", "midjourney v6", "niji 6",
+        ],
+        "Sora":                 ["sora", "openai sora", "openai video"],
+        "Adobe Firefly":        [
+            "firefly", "adobe firefly", "adobe generative", "content credentials",
+            "adobe stock ai", "firefly 2", "firefly 3", "adobe express ai",
+            "adobe photoshop generative",
+        ],
+        "Microsoft/Copilot":    [
+            "microsoft designer", "bing image creator", "copilot image",
+            "microsoft bing", "designer ai", "azure openai", "bing create",
+        ],
+        "Canva AI":             ["canva", "canva ai", "text to image canva"],
+        "Pika":                 ["pika labs", "pikalabs", "pika 1.0", "pika 2.0", "pika 2.2"],
+        "Runway":               [
+            "runway", "runwayml", "gen-1", "gen-2", "gen-3",
+            "runway gen", "runwayml.com", "runway alpha",
+        ],
+        "Kling":                ["kling", "kling ai", "kuaishou", "kwai-kolors"],
+        "Luma AI":              ["luma ai", "lumalabs", "dream machine", "luma dream"],
+        "Hailuo/MiniMax":       ["hailuo", "minimax", "hailuoai", "minimax video"],
+        "Haiper":               ["haiper", "haiper ai"],
+        "Wan/Alibaba":          ["wan ai", "alibaba wan", "tongyi", "wanx", "alibaba cloud ai"],
+        # ── Stable Diffusion y derivados ────────────────────────────────
+        "Stable Diffusion":     [
+            "stable diffusion", "automatic1111", "a1111", "comfyui", "comfy ui",
+            "invokeai", "diffusers", "safetensors", "dreambooth", "novelai",
+            "stable-diffusion", "sd webui", "sdwebui", "stable diffusion webui",
+            "vladmandic", "fooocus", "sd-next",
+        ],
+        "SDXL/Turbo/Lightning": [
+            "sdxl", "stable diffusion xl", "sdxl-turbo", "sdxl lightning",
+            "sdxl-lightning", "lcm", "latent consistency", "hyper-sd", "hyper sd",
+        ],
+        "Stable Cascade":       ["stable cascade", "würstchen", "wuerstchen"],
+        "Flux":                 [
+            "flux", "black forest labs", "bfl", "flux.1",
+            "flux-dev", "flux-schnell", "flux-pro", "bfl.ml",
+        ],
+        "PixArt":               ["pixart", "pixart-alpha", "pixart-sigma"],
+        "DeepFloyd IF":         ["deepfloyd", "deep floyd", "if-i", "if-ii"],
+        "Kandinsky":            ["kandinsky", "ai-forever", "sber"],
+        "Kolors":               ["kolors", "kwai-kolors"],
+        "AuraFlow":             ["auraflow", "aura flow"],
+        "CogView":              ["cogview", "cogview2", "cogview3", "thudm cogview"],
+        "HunyuanDiT":          ["hunyuan", "hunyuandit", "tencent hunyuan"],
+        "Janus/DeepSeek":       ["janus", "deepseek", "janus-pro", "deepseek janus"],
+        "AnimateDiff":          ["animatediff", "animate diff", "motion module"],
+        # ── Plataformas de consumo ───────────────────────────────────────
+        "Leonardo.ai":          ["leonardo.ai", "leonardo ai", "leonardo creative"],
+        "Ideogram":             ["ideogram", "ideogram ai", "ideogram v1", "ideogram v2", "ideogram v3"],
+        "Playground":           ["playground ai", "playgroundai", "playground v2", "playground v3"],
+        "Lexica":               ["lexica", "lexica.art", "lexica aperture"],
+        "Dreamlike":            ["dreamlike", "dreamlike.art", "dreamlike diffusion"],
+        "Artbreeder":           ["artbreeder", "artbreeder collage"],
+        "StarryAI":             ["starryai", "starry ai"],
+        "Wombo":                ["wombo", "dream by wombo", "wombo dream"],
+        "Craiyon":              ["craiyon", "dalle-mini", "dall-e mini", "mini dalle"],
+        "NightCafe":            ["nightcafe", "night cafe", "nightcafe creator"],
+        "Gencraft":             ["gencraft"],
+        "NovelAI":              ["novelai", "novel ai", "novelai diffusion"],
+        "Mage.space":           ["mage.space", "mage space", "mage ai"],
+        "Dezgo":                ["dezgo", "dezgo api"],
+        "Getimg.ai":            ["getimg", "getimg.ai"],
+        "Segmind":              ["segmind", "segmind api"],
+        "Venice.ai":            ["venice.ai", "venice ai"],
+        "SeaArt":               ["seaart", "sea art", "seaart.ai"],
+        "Tensor.art":           ["tensor.art", "tensorart", "tensor art"],
+        "Civitai":              ["civitai", "civit ai"],
+        # ── Edición con IA ──────────────────────────────────────────────
+        "Clipdrop/Stability":   ["clipdrop", "clip drop", "stability ai api", "stability.ai", "stabilityai"],
+        "Remini":               ["remini", "remini ai"],
+        "Luminar AI":           ["luminar ai", "luminar neo", "skylum"],
+        "Topaz":                ["topaz", "topaz labs", "gigapixel ai", "topaz photo ai"],
+        "PicsArt AI":           ["picsart", "picsart ai"],
+        "Pixlr AI":             ["pixlr", "pixlr ai"],
+        "Fotor AI":             ["fotor", "fotor ai"],
+        "Hotpot.ai":            ["hotpot.ai", "hotpot ai"],
+        "PhotoRoom":            ["photoroom", "photo room ai"],
+        "Deep Dream":           ["deep dream", "deepdream", "google deepdream"],
+        "FaceApp":              ["faceapp", "face app", "wireless lab"],
+        "Meitu":                ["meitu", "meipai", "meitu ai"],
+        "Kaiber":               ["kaiber", "kaiber ai"],
+        "Prodia":               ["prodia", "prodia api"],
+        "Replicate":            ["replicate", "replicate.com", "cog model"],
+        "RunDiffusion":         ["rundiffusion", "run diffusion"],
+        "PixAI":                ["pixai", "pixai.art"],
+        "Perchance":            ["perchance", "perchance.org ai"],
+        "Stablecog":            ["stablecog", "stable cog"],
+        "CF Spark":             ["cf spark", "creative fabrica spark"],
+        "Jasper Art":           ["jasper art", "jasperart"],
+        "Kapwing AI":           ["kapwing", "kapwing ai"],
+    }
+
+    _REAL_CAMERA_MAKERS: List[str] = [
+        # Cámaras profesionales / mirrorless / DSLR
+        "canon", "nikon", "sony", "fujifilm", "olympus", "panasonic",
+        "leica", "hasselblad", "phase one", "pentax", "sigma", "ricoh",
+        "mamiya", "gopro", "dji", "insta360", "blackmagic",
+        # Móviles — marcas principales
+        "apple", "samsung", "huawei", "xiaomi", "oppo", "motorola",
+        "google", "oneplus", "vivo", "realme", "honor", "poco",
+        "nothing", "asus", "lg", "htc", "nokia", "zte", "tcl",
+        "infinix", "tecno", "itel", "fairphone", "cat",
+        # Otros dispositivos con cámara
+        "microsoft", "amazon",
+    ]
+
+    _AI_HARDWARE_WORDS: List[str] = [
+        "ai model", "gemini", "generator ai", "synthid", "diffusion",
+    ]
+
+    _PNG_AI_CHUNK_KEYS = [
+        "parameters", "prompt", "Comment", "Description", "workflow",
+        "negative_prompt", "model", "Software", "invokeai_metadata",
+        "invokeai_graph", "comfy_prompt", "sd-metadata", "generation_data",
+        "image_generation_data", "ai_generated", "generator", "model_hash",
+        "vae", "cfg_scale", "sampler", "steps", "seed", "clip_skip",
+        "lora_hashes", "hashes", "naidata", "source", "title",
+        "fooocus_scheme", "fooocus_task", "kling_info", "video_frame",
+    ]
+
+    _KNOWN_SD_MODELS = [
+        "realisticvision", "realistic vision", "epicrealism", "deliberate",
+        "dreamshaper", "revanimated", "rev animated", "aom3", "orangemix",
+        "counterfeit", "anything", "chilloutmix", "ghostmix", "cyberrealistic",
+        "absolute reality", "absolutereality", "juggernautxl", "juggernaut xl",
+        "realvisxl", "dreamshaper xl", "playground v2", "copax", "ponyxl",
+        "pony diffusion", "novelai", "nai diffusion", "animefull", "anything v",
+        "holodayo", "waifu diffusion", "toon crafter",
+    ]
+
+    _AI_EDITING_SOFTWARE = [
+        "luminar ai", "luminar neo", "topaz", "gigapixel", "remini",
+        "faceapp", "meitu", "picsart", "photoroom", "remove.bg", "clipdrop",
+        "photoshop generative", "firefly", "lightroom ai", "denoise ai",
+    ]
+
+    # Firmas binarias de Grok/Aurora embebidas en el archivo
+    _GROK_BINARY_SIGNATURES = [
+        b"xai", b"aurora", b"grok", b"x.ai", b"xai\x00",
+        b"generated by x", b"grok-image",
+    ]
+
+    _C2PA_XMP_MARKER      = "c2pa"
+    _C2PA_JUMBF_SIGNATURE = b"jumb"
+    _WEBP_XMP_SIGNATURE   = b"XMP "
+    _JUMBF_SCAN_LIMIT     = 262144
+    _XMP_EXTRACT_LIMIT    = 262144
+
+    def analyze(self, data: bytes, img_pil: Image.Image) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "confirmed_ai":          False,
+            "generator":             "",
+            "real_camera":           False,
+            "real_camera_field_count": 0,
+            "c2pa_present":          False,
+            "c2pa_ai_signed":        False,
+            "raw_fields":            {},
+            "signals":               [],
+            "has_any_exif":          False,
+            "is_social_media":      False,
+        }
+        text_pool: List[str] = []
+
+        # -- Detectar Social Media por patrones de archivo (si el host lo provee en metadata o bytes) --
+        # Nota: En sistemas reales, a veces el filename viene en un chunk del archivo o se infiere.
+        # Aquí buscamos firmas binarias comunes o ausencia total de EXIF en formatos típicos.
+        # -- Detectar Social Media por firmas binarias (WhatsApp/Telegram/Instagram) --
+        scan_head = data[:8192].lower()
+        social_signatures = [b"whatsapp", b"telegram", b"instagram", b"screenshot", b"webui"]
+        if any(sig in scan_head for sig in social_signatures):
+            result["is_social_media"] = True
+            if b"webui" not in scan_head: # webui no es social media
+                result["signals"].append("Origen detectado: Firma binaria de Red Social/Captura")
+            else:
+                result["is_social_media"] = False
+        
+        # Escaneo de firmas de WhatsApp/Telegram en chunks de texto (si existen)
+        scan_head = data[:4096].lower()
+        if b"whatsapp" in scan_head or b"telegram" in scan_head or b"instagram" in scan_head:
+            result["is_social_media"] = True
+            result["signals"].append("Origen detectado: Red Social (compresión probable)")
+
+        # ── EXIF ─────────────────────────────────────────────────
+        try:
+            exif_obj = img_pil.getexif()
+            if exif_obj:
+                exif = {TAGS.get(k, str(k)): str(v) for k, v in exif_obj.items()}
+                result["raw_fields"]["exif"] = exif
+                result["has_any_exif"] = bool(exif)
+                text_pool.extend(exif.values())
+
+                make      = exif.get("Make", "").lower()
+                model_tag = exif.get("Model", "").lower()
+                software  = exif.get("Software", "").lower()
+                has_gps   = "GPSInfo" in exif
+                has_focal = "FocalLength" in exif
+
+                is_real_brand   = any(m in make for m in self._REAL_CAMERA_MAKERS)
+                is_google_pixel = "google" in make and "pixel" in model_tag
+                has_ai_words    = any(
+                    w in model_tag or w in software
+                    for w in self._AI_HARDWARE_WORDS
+                )
+
+                if (is_real_brand or is_google_pixel) and not has_ai_words:
+                    result["real_camera"] = True
+                elif not is_real_brand and not is_google_pixel and not has_ai_words:
+                    # V10.1: Detección genérica — si el EXIF tiene campos
+                    # típicos de cámara, tratar como cámara real.
+                    has_photo_fields = (
+                        exif.get("DateTimeOriginal") or
+                        exif.get("FNumber") or
+                        exif.get("ExposureTime") or
+                        exif.get("ISOSpeedRatings") or
+                        exif.get("PhotographicSensitivity") or
+                        has_focal
+                    )
+                    if has_photo_fields:
+                        result["real_camera"] = True
+
+                # Contar campos EXIF para TODAS las cámaras reales detectadas
+                if result["real_camera"]:
+                    cam_str = f"{exif.get('Make', '')} {exif.get('Model', '')}".strip()
+                    real_fields = []
+                    if exif.get("ExposureTime"):  real_fields.append("ExposureTime")
+                    if exif.get("FNumber"):        real_fields.append("FNumber")
+                    if exif.get("ISOSpeedRatings") or exif.get("PhotographicSensitivity"):
+                        real_fields.append("ISO")
+                    if exif.get("LensModel") or exif.get("LensMake"):
+                        real_fields.append("LensInfo")
+                    if has_gps:   real_fields.append("GPS")
+                    if has_focal: real_fields.append("FocalLength")
+                    if exif.get("DateTimeOriginal"): real_fields.append("DateTime")
+                    result["real_camera_field_count"] = len(real_fields)
+                    result["signals"].append(
+                        f"EXIF de cámara real: {cam_str} [{', '.join(real_fields)}]"
+                    )
+
+                # Software IA embebido
+                for ai_sw in self._AI_EDITING_SOFTWARE:
+                    if ai_sw in software:
+                        result["confirmed_ai"] = True
+                        result["generator"] = result["generator"] or f"Edición IA ({ai_sw})"
+                        result["signals"].append(f"Software IA en EXIF: '{ai_sw}'")
+                        break
+
+                # Detección de upscale IA por resolución exacta
+                try:
+                    w_img, h_img = img_pil.size
+                    for bw, bh in [(512, 512), (512, 768), (768, 512), (1024, 1024)]:
+                        for scale in [2, 4, 8]:
+                            if w_img == bw * scale and h_img == bh * scale:
+                                result["signals"].append(
+                                    f"Resolución exacta de upscale IA {scale}x "
+                                    f"({bw}×{bh} → {w_img}×{h_img})"
+                                )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.debug(f"EXIF no disponible: {e}")
+
+        # ── PNG / WebP chunks ────────────────────────────────────
+        try:
+            info = img_pil.info or {}
+            result["raw_fields"]["img_info"] = {k: str(v)[:300] for k, v in info.items()}
+            for key in self._PNG_AI_CHUNK_KEYS:
+                val = info.get(key)
+                if not val:
+                    continue
+                val_str = str(val)
+                text_pool.append(val_str)
+
+                if key == "parameters" and len(val_str) > 10:
+                    result["confirmed_ai"] = True
+                    result["generator"]    = "Stable Diffusion (A1111/WebUI)"
+                    result["signals"].append("PNG chunk 'parameters' (firma A1111)")
+                elif key in ("prompt", "workflow") and val_str.strip().startswith("{"):
+                    result["confirmed_ai"] = True
+                    result["generator"]    = result["generator"] or "Stable Diffusion (ComfyUI)"
+                    result["signals"].append(f"PNG chunk '{key}' con JSON workflow")
+                elif key in ("invokeai_metadata", "invokeai_graph"):
+                    result["confirmed_ai"] = True
+                    result["generator"]    = "InvokeAI"
+                    result["signals"].append(f"Chunk InvokeAI: '{key}'")
+                elif key in ("fooocus_scheme", "fooocus_task"):
+                    result["confirmed_ai"] = True
+                    result["generator"]    = "Fooocus"
+                    result["signals"].append(f"Chunk Fooocus: '{key}'")
+                elif key in ("model", "model_hash", "steps", "cfg_scale", "sampler"):
+                    val_lower = val_str.lower()
+                    for model_name in self._KNOWN_SD_MODELS:
+                        if model_name in val_lower:
+                            result["confirmed_ai"] = True
+                            result["generator"]    = result["generator"] or f"SD ({model_name})"
+                            result["signals"].append(f"Modelo SD en '{key}': {model_name}")
+                            break
+                elif key == "source" and "novelai" in val_str.lower():
+                    result["confirmed_ai"] = True
+                    result["generator"]    = "NovelAI"
+                    result["signals"].append("Firma NovelAI en chunk 'source'")
+        except Exception as e:
+            logger.debug(f"PNG/WebP info: {e}")
+
+        # ── XMP ──────────────────────────────────────────────────
+        try:
+            xmp_data: Optional[str] = None
+            for xk in ["XML:com.adobe.xmp", "xmp", "XMP"]:
+                if xk in (img_pil.info or {}):
+                    xmp_data = str(img_pil.info[xk])
+                    break
+            if not xmp_data and self._WEBP_XMP_SIGNATURE in data[:self._JUMBF_SCAN_LIMIT]:
+                start = data.find(self._WEBP_XMP_SIGNATURE)
+                if start != -1:
+                    xmp_data = data[start:start + self._XMP_EXTRACT_LIMIT].decode("ascii", errors="ignore")
+            if xmp_data:
+                result["raw_fields"]["xmp_snippet"] = xmp_data[:500]
+                text_pool.append(xmp_data)
+                if self._C2PA_XMP_MARKER in xmp_data.lower():
+                    result["c2pa_present"] = True
+                    result["signals"].append("Manifesto C2PA en XMP")
+        except Exception as e:
+            logger.debug(f"XMP: {e}")
+
+        # ── C2PA binario ──────────────────────────────────────────
+        try:
+            scan = data[:self._JUMBF_SCAN_LIMIT]
+            if self._C2PA_JUMBF_SIGNATURE in scan:
+                result["c2pa_present"] = True
+                result["signals"].append("Manifesto C2PA/JUMBF en binario")
+                scan_lower = scan.lower()
+                if b"google" in scan_lower or b"deepmind" in scan_lower:
+                    text_pool.append("google deepmind c2pa")
+        except Exception as e:
+            logger.debug(f"C2PA: {e}")
+
+        # ── Escaneo binario Grok/Aurora ───────────────────────────
+        try:
+            scan_lower = data[:self._JUMBF_SCAN_LIMIT].lower()
+            for sig in self._GROK_BINARY_SIGNATURES:
+                if sig in scan_lower:
+                    result["confirmed_ai"] = True
+                    result["generator"]    = "Grok/Aurora"
+                    result["signals"].append(
+                        f"Firma binaria Grok/Aurora: '{sig.decode('utf-8', errors='replace')}'"
+                    )
+                    break
+        except Exception as e:
+            logger.debug(f"Binario Grok: {e}")
+
+        # ── Búsqueda de firmas IA en texto acumulado ─────────────
+        if not result["confirmed_ai"]:
+            combined = " ".join(text_pool).lower()
+            for generator, tokens in self._AI_SIGNATURES.items():
+                matched = [t for t in tokens if t in combined]
+                if matched:
+                    result["confirmed_ai"] = True
+                    result["generator"]    = generator
+                    result["signals"].append(
+                        f"Firma IA en metadata: '{matched[0]}' → {generator}"
+                    )
+                    if result["c2pa_present"]:
+                        result["c2pa_ai_signed"] = True
+                    break
+
+        # ── Detección de resolución nativa IA (sin metadata) ─────
+        if not result["confirmed_ai"]:
+            try:
+                w_img, h_img = img_pil.size
+                if (w_img, h_img) in _AI_NATIVE_RESOLUTIONS_SET and not result["real_camera"]:
+                    result["signals"].append(
+                        f"Resolución nativa de generador IA: {w_img}×{h_img}"
+                    )
+                    # No marcar confirmed_ai — solo señal de apoyo
+            except Exception:
+                pass
+
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# MÓDULO 4: ELA — ERROR LEVEL ANALYSIS
+# ═══════════════════════════════════════════════════════════════
+class ELAAnalyzer:
+    _FALLBACK: Dict[str, Any] = {
+        "ela_mean": None, "ela_std": None, "ela_max": None,
+        "ela_region_std": None, "ela_uniformity": None,
+        "tampered_hotspot": None, "partial_ai_suspected": False,
+        "heatmap_b64": None,
+    }
+
+    def __init__(self, quality: int = 95):
+        self.quality = quality
+
+    def analyze(self, data: bytes, img_pil: Image.Image) -> Dict[str, Any]:
+        try:
+            buf = io.BytesIO()
+            img_rgb = img_pil.convert("RGB")
+            img_rgb.save(buf, format="JPEG", quality=self.quality, subsampling=0)
+            buf.seek(0)
+            img_recomp = Image.open(buf).convert("RGB")
+
+            orig_arr   = np.array(img_rgb, dtype=np.float32)
+            recomp_arr = np.array(img_recomp, dtype=np.float32)
+            ela_diff   = np.abs(orig_arr - recomp_arr)
+            ela_gray   = ela_diff.mean(axis=2)
+
+            ela_mean = float(ela_gray.mean())
+            ela_std  = float(ela_gray.std())
+            ela_max  = float(ela_gray.max())
+
+            h, w   = ela_gray.shape
+            rh, rw = h // 4, w // 4
+            region_means = [
+                float(ela_gray[i*rh:(i+1)*rh, j*rw:(j+1)*rw].mean())
+                for i in range(4) for j in range(4)
+                if ela_gray[i*rh:(i+1)*rh, j*rw:(j+1)*rw].size > 0
+            ]
+            ela_region_std = float(np.std(region_means)) if region_means else 0.0
+            ela_uniformity = float(
+                1.0 - np.clip(ela_region_std / (ela_mean + 1e-5), 0.0, 1.0)
+            )
+
+            grid_size = 16
+            rh16, rw16 = max(1, h // grid_size), max(1, w // grid_size)
+            max_error = 0.0
+            tampered: Optional[Dict[str, Any]] = None
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    patch = ela_gray[i*rh16:(i+1)*rh16, j*rw16:(j+1)*rw16]
+                    if patch.size > 0:
+                        pm = float(patch.mean())
+                        if pm > max_error:
+                            max_error = pm
+                            tampered = {
+                                "x": round(j / grid_size, 2),
+                                "y": round(i / grid_size, 2),
+                                "error_score": round(pm, 2),
+                            }
+
+            partial_ai = bool(max_error > (ela_mean * 2.5) and ela_region_std > 15.0)
+
+            visual   = np.clip(ela_gray * 15.0, 0, 255).astype(np.uint8)
+            heatmap  = cv2.applyColorMap(visual, cv2.COLORMAP_INFERNO)
+            orig_bgr = cv2.cvtColor(np.array(img_rgb), cv2.COLOR_RGB2BGR)
+            overlay  = cv2.addWeighted(orig_bgr, 0.4, heatmap, 0.6, 0)
+            _, enc   = cv2.imencode(".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            heatmap_b64 = base64.b64encode(enc).decode("utf-8")
+
+            return {
+                "ela_mean":             round(ela_mean, 3),
+                "ela_std":              round(ela_std, 3),
+                "ela_max":              round(ela_max, 3),
+                "ela_region_std":       round(ela_region_std, 3),
+                "ela_uniformity":       round(ela_uniformity, 4),
+                "tampered_hotspot":     tampered,
+                "partial_ai_suspected": partial_ai,
+                "heatmap_b64":          heatmap_b64,
+            }
+        except Exception as e:
+            logger.warning(f"ELA falló: {e}")
+            return dict(self._FALLBACK)
+
+
+# ═══════════════════════════════════════════════════════════════
+# MÓDULO 5: FINGERPRINTING ESPECTRAL
+# ═══════════════════════════════════════════════════════════════
+class AIGeneratorFingerprinter:
+    """Detecta patrones visuales específicos de cada familia de generador."""
+
+    @staticmethod
+    def analyze(
+        gray: np.ndarray,
+        img_cv: np.ndarray,
+        features: Dict[str, float],
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "family_scores": {},
+            "top_family": None,
+            "top_score": 0.0,
+            "signals": [],
+            "fft_grid_detected": False,
+            "edge_halo_detected": False,
+            "noise_injection_detected": False,
+        }
+        h, w = gray.shape
+
+        # A. Grid FFT — SD / Flux / PixArt (latent space 8×8 / 16×16)
+        try:
+            mag = np.abs(np.fft.fftshift(np.fft.fft2(gray.astype(float))))
+            mag_log = np.log1p(mag)
+            cy, cx = h // 2, w // 2
+            grid_score = 0.0
+            for divisor in [8, 16, 32]:
+                fy, fx = h // divisor, w // divisor
+                if fy > 0 and fx > 0:
+                    rs = max(2, min(fy, fx) // 4)
+                    for dy, dx in [(fy, 0), (0, fx), (fy, fx), (-fy, fx)]:
+                        py, px = cy + dy, cx + dx
+                        if 0 < py < h and 0 < px < w:
+                            peak = mag_log[py, px]
+                            nb = mag_log[
+                                max(0, py-rs):min(h, py+rs),
+                                max(0, px-rs):min(w, px+rs)
+                            ]
+                            if nb.size > 0:
+                                nm = float(np.mean(nb))
+                                if nm > 0:
+                                    grid_score = max(grid_score, peak / nm)
+            if grid_score > 1.8:
+                result["fft_grid_detected"] = True
+                result["signals"].append(
+                    f"Patrón de rejilla VAE/DCT en FFT (ratio={grid_score:.2f}) → SD/Flux/PixArt"
+                )
+                result["family_scores"]["stablediffusion"] = (
+                    result["family_scores"].get("stablediffusion", 0) +
+                    min(35.0, grid_score * 12.0)
+                )
         except Exception:
             pass
 
-        return has_real, has_ai
-
-    # ─────────────────────────────────────────────
-    # ANÁLISIS FORENSE GENERAL
-    # ─────────────────────────────────────────────
-
-    # ─────────────────────────────────────────────
-    # FILTRO SRM (Spatial Rich Model)
-    # ─────────────────────────────────────────────
-
-    def _srm_filter(self, gray):
-        """
-        Filtro Spatial Rich Model (SRM).
-        Extrae el mapa de ruido de alta frecuencia residual.
-        Las IAs generativas tienden a producir un ruido estadísticamente
-        demasiado uniforme / bajo en varianza comparado con fotos reales.
-        """
-        kernel = np.array([
-            [-1,  2, -1],
-            [ 2, -4,  2],
-            [-1,  2, -1],
-        ], dtype=np.float32) / 4.0
-        filtered = cv2.filter2D(gray.astype(np.float32), -1, kernel)
-        return float(np.var(filtered))
-
-    def _gradient_flatness(self, gray):
-        """
-        Métrica de alto impacto: Las IAs generan gradientes demasiado suaves.
-        Medimos cuántos píxeles tienen gradiente prácticamente cero en zonas
-        que deberían tener variación (piel, cielo, tela, etc.)
-        Real = muchas micro-variaciones. IA = áreas planas perfectas.
-        """
+        # B. Halos en bordes — Midjourney V5/V6
         try:
-            grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-            grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-            magnitude = np.sqrt(grad_x**2 + grad_y**2)
-            # Porcentaje de píxeles con gradiente casi nulo (<2.0)
-            flat_ratio = float(np.mean(magnitude < 2.0))
-            # Varianza del campo de gradientes (baja = demasiado uniforme)
-            grad_var = float(np.var(magnitude))
-            return flat_ratio, grad_var
+            edges = cv2.Canny(gray, 50, 150)
+            if float(np.mean(edges > 0)) > 0.02:
+                kernel = np.ones((5, 5), np.float32) / 25
+                blurred = cv2.filter2D(gray.astype(np.float32), -1, kernel)
+                halo_diff = np.abs(gray.astype(np.float32) - blurred)
+                ez = halo_diff[edges > 0]
+                sz = halo_diff[edges == 0]
+                if ez.size > 100 and sz.size > 100:
+                    halo_ratio = float(np.mean(ez)) / (float(np.mean(sz)) + 1e-5)
+                    if 2.0 < halo_ratio < 5.5:
+                        result["edge_halo_detected"] = True
+                        result["signals"].append(
+                            f"Halo en bordes (ratio={halo_ratio:.2f}) → Midjourney/SDXL"
+                        )
+                        result["family_scores"]["midjourney"] = (
+                            result["family_scores"].get("midjourney", 0) +
+                            min(25.0, (5.5 - halo_ratio) * 8.0)
+                        )
         except Exception:
-            return 0.0, 9999.0
+            pass
 
-    def _smooth_area_noise_floor(self, gray):
-        """
-        Métrica crítica: En zonas uniformes (cielo, piel lisa),
-        una foto real tiene ruido ISO. Una imagen IA tiene cero ruido
-        porque el VAE interpola perfectamente.
-        """
+        # C. Ruido inyectado artificialmente — DALL-E 3
         try:
-            # Detectar zonas muy uniformes (bajo gradiente local)
-            blur = cv2.GaussianBlur(gray, (15, 15), 0)
-            diff_from_blur = np.abs(gray.astype(np.float32) - blur.astype(np.float32))
-            smooth_mask = diff_from_blur < 3.0  # zona muy uniform
-            if smooth_mask.sum() < 100:          # no hay zonas suaves
-                return 50.0                      # valor neutral
-            noise_in_smooth = float(np.std(gray[smooth_mask].astype(np.float32)))
-            return noise_in_smooth               # Real > 2.5, IA < 1.5
+            nl  = features.get("noise_level")
+            bcs = features.get("block_consistency_std")
+            if nl is not None and bcs is not None:
+                if 0.8 < nl < 4.0 and bcs < 500.0:
+                    su = 1.0 - min(1.0, bcs / 1000.0)
+                    if su > 0.6:
+                        result["noise_injection_detected"] = True
+                        result["signals"].append(
+                            f"Ruido espacialmente uniforme (n={nl:.2f}, uniformity={su:.2f}) → DALL-E 3/MJ"
+                        )
+                        result["family_scores"]["dalle"] = (
+                            result["family_scores"].get("dalle", 0) + min(20.0, su * 22.0)
+                        )
         except Exception:
-            return 50.0
+            pass
 
-    def _color_channel_independence(self, img_cv):
-        """
-        En fotos reales cada canal tiene ruido independiente del sensor.
-        En IA los canales son hiperbolicamente correlacionados.
-        Retorna la media de correlación cruzada de canales (Real: <0.85, IA: >0.92)
-        """
+        # C-bis. Superficie pulida — Grok/Flux (ruido muy bajo)
         try:
-            b, g, r = [c.astype(np.float32).flatten() for c in cv2.split(img_cv)]
-            corr_rg = float(np.corrcoef(r, g)[0, 1])
-            corr_rb = float(np.corrcoef(r, b)[0, 1])
-            corr_gb = float(np.corrcoef(g, b)[0, 1])
-            return (corr_rg + corr_rb + corr_gb) / 3.0
+            nl = features.get("noise_level")
+            if nl is not None and nl < 1.5:
+                boost = min(35.0, (1.5 - nl) * 80.0)
+                result["signals"].append(
+                    f"Superficie sintéticamente pulida (n={nl:.2f}) → Grok/Flux"
+                )
+                result["family_scores"]["grok"] = (
+                    result["family_scores"].get("grok", 0) + boost
+                )
         except Exception:
-            return 0.0
+            pass
 
-    def _forensics(self, img_pil, img_cv, gray):
-        noise = float(np.var(cv2.Laplacian(gray, cv2.CV_64F)))
-        edges = cv2.Canny(gray, 100, 200)
-        edge_density = float(np.sum(edges) / (edges.size + 1e-7))
-
-        f = np.fft.fft2(gray)
-        mag = np.abs(np.fft.fftshift(f))
-        h, w = gray.shape
-        center = mag[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
-        outer = mag.copy()
-        outer[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4] = 0
-        fft_ratio = float(np.sum(outer) / (np.sum(center) + 1e-7))
-
-        blockiness  = self._jpeg_blockiness(gray)
-        ela_var     = self._compute_ela(img_pil, img_cv)
-        color_var   = self._color_variance(img_cv)
-        texture_score = self._texture_uniformity(gray)
-        rolloff     = self._high_freq_rolloff(gray)
-        entropy_var = self._local_entropy_variance(gray)
-        srm_noise   = self._srm_filter(gray)
-        grad_flat, grad_var  = self._gradient_flatness(gray)
-        smooth_noise = self._smooth_area_noise_floor(gray)
-        chan_corr    = self._color_channel_independence(img_cv)
-
-        return {
-            "noise": noise,
-            "edges": edge_density,
-            "fft_ratio": fft_ratio,
-            "blockiness": blockiness,
-            "ela_var": ela_var,
-            "color_var": color_var,
-            "texture_score": texture_score,
-            "rolloff": rolloff,
-            "entropy_var": entropy_var,
-            "srm_noise": srm_noise,
-            "grad_flat": grad_flat,
-            "grad_var": grad_var,
-            "smooth_noise": smooth_noise,
-            "chan_corr": chan_corr,
-        }
-
-    def _high_freq_rolloff(self, gray):
-        f = np.fft.fft2(gray)
-        fshift = np.fft.fftshift(f)
-        mag = np.abs(fshift) + 1e-7
-        h, w = gray.shape
-        cy, cx = h // 2, w // 2
-        y, x = np.ogrid[:h, :w]
-        r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-        max_r = min(h, w) / 2
-        mask_mid = (r > max_r * 0.3) & (r <= max_r * 0.6)
-        mask_high = (r > max_r * 0.8) & (r <= max_r * 0.95)
-        energy_mid = float(np.mean(mag[mask_mid])) if np.any(mask_mid) else 1.0
-        energy_high = float(np.mean(mag[mask_high])) if np.any(mask_high) else 1.0
-        return energy_mid / (energy_high + 1e-5)
-
-    def _local_entropy_variance(self, gray):
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        local_var = cv2.Laplacian(blur, cv2.CV_64F) ** 2
-        return float(np.var(local_var))
-
-    def _jpeg_blockiness(self, gray):
-        h, w = gray.shape
-        block = 8
-        diff = 0
-        gray_int = gray.astype(np.int32)
-        for i in range(block, h, block):
-            diff += np.sum(np.abs(gray_int[i, :] - gray_int[i - 1, :]))
-        for j in range(block, w, block):
-            diff += np.sum(np.abs(gray_int[:, j] - gray_int[:, j - 1]))
-        return float(diff / (h * w + 1e-7))
-
-    def _compute_ela(self, img_pil, img_cv):
-        try:
-            buffer = io.BytesIO()
-            img_pil.save(buffer, format="JPEG", quality=90)
-            buffer.seek(0)
-            img_c = Image.open(buffer).convert("RGB")
-            img_c_cv = cv2.cvtColor(np.array(img_c), cv2.COLOR_RGB2BGR)
-            diff = cv2.absdiff(img_cv, img_c_cv)
-            max_d = np.max(diff)
-            if max_d == 0:
-                return 0.0
-            return float(np.var(diff * (255.0 / max_d)))
-        except Exception:
-            return 0.0
-
-    def _color_variance(self, img_cv):
+        # D. Coeficiente de variación de saturación — Grok/Aurora
         try:
             hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
-            return float(np.var(hsv[:, :, 1]))
+            sat = hsv[:, :, 1].astype(float)
+            sat_cv = float(np.std(sat) / (np.mean(sat) + 1e-5))
+            if sat_cv < 0.40:
+                result["signals"].append(
+                    f"Croma ultra-estrecha (CV={sat_cv:.3f}) → Grok/Flux"
+                )
+                result["family_scores"]["grok"] = (
+                    result["family_scores"].get("grok", 0) +
+                    min(30.0, (0.40 - sat_cv) * 80.0)
+                )
+            elif sat_cv < 0.50:
+                result["family_scores"]["dalle"] = (
+                    result["family_scores"].get("dalle", 0) + 10.0
+                )
         except Exception:
-            return 0.0
+            pass
 
-    def _texture_uniformity(self, gray):
-        kernel = np.ones((8, 8), np.float32) / 64
-        mean = cv2.filter2D(gray.astype(np.float32), -1, kernel)
-        sq_mean = cv2.filter2D((gray.astype(np.float32)) ** 2, -1, kernel)
-        local_var = sq_mean - mean ** 2
-        return float(np.mean(np.sqrt(np.maximum(local_var, 0))))
-
-    def _residual_noise(self, gray):
-        blur = cv2.bilateralFilter(gray, 9, 75, 75).astype(np.float32)
-        residual = np.abs(gray.astype(np.float32) - blur)
-        return float(np.var(residual))
-
-    # ─────────────────────────────────────────────
-    # FIRMA ESPECÍFICA GROK AURORA  ██████
-    # ─────────────────────────────────────────────
-
-    def _grok_aurora_signature(self, img_pil, img_cv, gray):
-        """
-        Detecta la firma del VAE de xAI (Grok Aurora).
-        Aurora usa un espacio latente altamente comprimido que deja rastros 
-        matemáticos de periodicidad de 2x2 píxeles.
-        """
-        score = 0.0
-        reasons = []
-
+        # E. Suavizado central selectivo — SD/MJ (piel sintética)
         try:
-            h, w = gray.shape
-            min_dim = min(h, w)
-            
-            if min_dim < 64:
-                reasons.append("Imagen muy pequeña para análisis forense completo")
-                return 0.0, reasons
-
-            cb_score = self._vae_checkerboard(gray)
-            if cb_score > 0.08:            # antes: 0.15
-                score += 30
-                reasons.append(f"Artefacto de rejilla VAE detectado (score={cb_score:.2f})")
-            elif cb_score > 0.05:
-                score += 12
-                reasons.append(f"Rejilla VAE leve detectada (score={cb_score:.2f})")
-
-            rgb_corr = self._rgb_interchannel_correlation(img_cv)
-            if rgb_corr > 0.95:            # antes: 0.98
-                score += 25
-                reasons.append(f"Correlación RGB sintética ({rgb_corr:.3f})")
-            elif rgb_corr > 0.90:
-                score += 10
-                reasons.append(f"Correlación RGB elevada ({rgb_corr:.3f})")
-
-            chroma_ratio = self._chroma_blur_ratio(img_cv)
-            if chroma_ratio > 2.5:         # antes: 3.8
-                score += 20
-                reasons.append(f"Chroma Bleeding detectado (ratio={chroma_ratio:.1f})")
-            elif chroma_ratio > 1.8:
-                score += 8
-                reasons.append(f"Chroma Blur leve (ratio={chroma_ratio:.1f})")
-
-            dwt_score = self._dwt_artifact_detection(gray)
-            if dwt_score > 0.08:           # antes: 0.12
-                score += 15
-                reasons.append(f"Firma DWT detectada (score={dwt_score:.2f})")
-            elif dwt_score > 0.05:
-                score += 6
-                reasons.append(f"Firma DWT leve (score={dwt_score:.2f})")
-
-        except Exception as e:
-            print(f"Error en firma Grok: {e}")
-
-        return min(score, 100.0), reasons
-
-    @functools.lru_cache(maxsize=32)
-    def _dwt_artifact_detection(self, gray):
-        """Detecta artefactos de compresión DWT typical de VAEs."""
-        try:
-            import pywt
-            coeffs = pywt.wavedec2(gray, 'haar', level=2)
-            cH = np.abs(coeffs[1][0])
-            cV = np.abs(coeffs[1][1])
-            cD = np.abs(coeffs[1][2])
-            
-            energy = np.mean(cH) + np.mean(cV) + np.mean(cD)
-            detail_energy = np.std(cH) + np.std(cV) + np.std(cD)
-            
-            return float(detail_energy / (energy + 1e-7))
-        except ImportError:
-            return 0.0
+            ch, cw = h // 4, w // 4
+            center = gray[ch:3*ch, cw:3*cw]
+            border = np.concatenate([
+                gray[:ch, :].ravel(), gray[3*ch:, :].ravel(),
+                gray[:, :cw].ravel(), gray[:, 3*cw:].ravel(),
+            ])
+            if center.size > 1000 and border.size > 1000:
+                ratio = float(np.var(border)) / (float(np.var(center)) + 1e-5)
+                if ratio > 4.0:
+                    result["signals"].append(
+                        f"Suavizado central selectivo (ratio={ratio:.1f}) → SD/MJ"
+                    )
+                    result["family_scores"]["midjourney"] = (
+                        result["family_scores"].get("midjourney", 0) +
+                        min(20.0, (ratio - 4.0) * 5.0)
+                    )
+                    result["family_scores"]["stablediffusion"] = (
+                        result["family_scores"].get("stablediffusion", 0) +
+                        min(15.0, (ratio - 4.0) * 3.5)
+                    )
         except Exception:
-            return 0.0
+            pass
 
-    # ─────────────────────────────────────────────
-    # FUNCIONES MATEMÁTICAS AVANZADAS
-    # ─────────────────────────────────────────────
-
-    def _vae_checkerboard(self, gray):
-        """Calcula la energía en las esquinas del espectro (periodicidad 2px)."""
-        f = np.fft.fft2(gray.astype(np.float32))
-        fshift = np.fft.fftshift(f)
-        mag = np.abs(fshift)
-        h, w = mag.shape
-        # Miramos la energía en los bordes del espectro (alta frecuencia pura)
-        corners = (mag[0:5, 0:5].mean() + mag[-5:, -5:].mean()) / 2
-        center = mag[h//2-5:h//2+5, w//2-5:w//2+5].mean()
-        return float(corners / (center + 1e-7))
-
-    def _rgb_interchannel_correlation(self, img_cv):
-        """Mide qué tan 'pegados' están los colores."""
-        b, g, r = cv2.split(img_cv.astype(np.float32))
-        corr_rg = np.corrcoef(r.flatten(), g.flatten())[0,1]
-        corr_rb = np.corrcoef(r.flatten(), b.flatten())[0,1]
-        return (corr_rg + corr_rb) / 2
-
-    def _chroma_blur_ratio(self, img_cv):
-        """Diferencia de nitidez entre blanco y negro vs color."""
-        ycrcb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2YCrCb)
-        y, cr, cb = cv2.split(ycrcb)
-        y_lap = cv2.Laplacian(y, cv2.CV_64F).var()
-        c_lap = (cv2.Laplacian(cr, cv2.CV_64F).var() + cv2.Laplacian(cb, cv2.CV_64F).var()) / 2
-        return float(y_lap / (c_lap + 1e-7))
-
-    # ─────────────────────────────────────────────
-    # DETECCIÓN DE ROSTROS
-    # ─────────────────────────────────────────────
-
-    def _detect_faces(self, gray):
-        min_size = self.config.get("min_face_size", 50)
-        faces = self.face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(min_size, min_size))
-        return faces
-
-    def _face_symmetry(self, gray, faces):
-        sym_scores = []
-        min_size = self.config.get("min_face_size", 50)
-        for x, y, w, h in faces:
-            if w < min_size or h < min_size:
-                continue
-            face = gray[y : y + h, x : x + w]
-            flip = cv2.flip(face, 1)
-            diff = np.mean(np.abs(face.astype(np.float32) - flip.astype(np.float32)))
-            sym_scores.append(diff)
-        
-        if not sym_scores:
-            return None
-        return float(np.mean(sym_scores))
-
-    def _face_liveness(self, img_cv, faces):
-        """Detecta señales de liveness en rostros (reflejos, textura)."""
-        if len(faces) == 0:
-            return 0.0
-        
-        liveness_scores = []
-        for x, y, w, h in faces:
-            if w < 50 or h < 50:
-                continue
-            
-            face_bgr = img_cv[y:y+h, x:x+w]
-            hsv = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2HSV)
-            
-            v_channel = hsv[:, :, 2]
-            skin_tone_var = np.var(v_channel)
-            
-            eye_regions = [
-                face_bgr[int(h*0.2):int(h*0.35), int(w*0.25):int(w*0.4)],
-                face_bgr[int(h*0.2):int(h*0.35), int(w*0.6):int(w*0.75)],
-            ]
-            
-            has_eyes = all(r.shape[0] > 5 and r.shape[1] > 5 for r in eye_regions)
-            if has_eyes:
-                pupil_dark = sum(np.mean(r[:, :, 0]) < 80 for r in eye_regions if r.size > 0)
-                liveness_scores.append(pupil_dark / 2)
-        
-        return float(np.mean(liveness_scores)) if liveness_scores else 0.0
-
-    # ─────────────────────────────────────────────
-    # SCORING DE MODELOS NEURONALES
-    # ─────────────────────────────────────────────
-
-    def _score_model(self, model, img):
-        if not model:
-            return None
+        # F. Sobre-nitidez — Flux / SDXL Lightning
         try:
-            res = model(img)
-            if isinstance(res, dict):
-                res = [res]
-            # dict comprehension más eficiente
-            scores = {str(r["label"]).lower(): float(r["score"]) for r in res}
+            lv = features.get("laplacian_var")
+            fr = features.get("fft_ratio")
+            if lv is not None and fr is not None:
+                if lv > 3000 and fr > 0.45:
+                    result["signals"].append(
+                        f"Sobre-nitidez artificial (LapVar={lv:.0f}, FFT={fr:.2f}) → Flux/SDXL Lightning"
+                    )
+                    result["family_scores"]["flux"] = (
+                        result["family_scores"].get("flux", 0) +
+                        min(25.0, (fr - 0.45) * 80.0)
+                    )
+        except Exception:
+            pass
 
-            ai_patterns   = ["fake", "ai", "artificial", "synthetic", "generated", "non-photo"]
-            real_patterns = ["real", "human", "natural", "photo", "authentic", "genuine"]
+        # G. NUEVO V9: Entropía local baja — detecta texturas IA uniformes
+        try:
+            lte = features.get("local_texture_entropy")
+            if lte is not None and lte < 4.2:
+                ai_entropy_score = min(25.0, (4.2 - lte) * 20.0)
+                result["signals"].append(
+                    f"Entropía local de textura baja (lte={lte:.2f}) → textura IA"
+                )
+                result["family_scores"]["grok"] = (
+                    result["family_scores"].get("grok", 0) + ai_entropy_score * 0.6
+                )
+                result["family_scores"]["stablediffusion"] = (
+                    result["family_scores"].get("stablediffusion", 0) + ai_entropy_score * 0.4
+                )
+        except Exception:
+            pass
 
-            for key, sc in scores.items():
-                if any(x in key for x in ai_patterns):
-                    return sc * 100
-                if any(x in key for x in real_patterns):
-                    return (1.0 - sc) * 100
+        # H. NUEVO V9: Ausencia de dominancia verde
+        try:
+            gd = features.get("green_channel_dominance")
+            if gd is not None and gd < 1.05:
+                result["signals"].append(
+                    f"Sin dominancia de canal verde (gd={gd:.2f}) → sin sensor Bayer → IA"
+                )
+                for fam in ["grok", "dalle", "midjourney"]:
+                    result["family_scores"][fam] = (
+                        result["family_scores"].get(fam, 0) + 10.0
+                    )
+        except Exception:
+            pass
 
-            if len(scores) == 1:
-                return list(scores.values())[0] * 100
-            return None
-        except Exception as e:
-            logger.debug(f"Modelo falló en predicción: {e}")
-            return None
+        # I. NUEVO V10: Paleta de color estrecha → Grok/Flux
+        try:
+            cc = features.get("color_cluster_count")
+            hs = features.get("color_hue_spread")
+            if cc is not None and hs is not None:
+                if cc <= 5 and hs < 60.0:
+                    palette_score = min(30.0, (6 - cc) * 8.0 + (60.0 - hs) * 0.3)
+                    result["signals"].append(
+                        f"Paleta de color estrecha ({cc} clusters, hue_spread={hs:.0f}°) → Grok/Flux"
+                    )
+                    result["family_scores"]["grok"] = (
+                        result["family_scores"].get("grok", 0) + palette_score * 0.7
+                    )
+                    result["family_scores"]["flux"] = (
+                        result["family_scores"].get("flux", 0) + palette_score * 0.3
+                    )
+                elif cc <= 4:
+                    result["family_scores"]["grok"] = (
+                        result["family_scores"].get("grok", 0) + 12.0
+                    )
+        except Exception:
+            pass
 
-    def _score_model_safe(self, model_name, img):
-        cache_key = f"{model_name}_{id(img)}"
-        if cache_key in self._models_cache:
-            return self._models_cache[cache_key]
-        
-        model = getattr(self, model_name, None)
-        result = self._score_model(model, img)
-        
-        if len(self._models_cache) > 100:
-            self._models_cache.clear()
-        self._models_cache[cache_key] = result
+        # J. NUEVO V10: FFT mid-band ringing → Grok/Aurora upsampler
+        try:
+            mbr = features.get("fft_midband_ring")
+            if mbr is not None and mbr > 1.5:
+                ring_score = min(30.0, (mbr - 1.5) * 25.0)
+                result["signals"].append(
+                    f"Ringing espectral mid-band (ratio={mbr:.2f}) → artefacto upsampler Grok/Aurora"
+                )
+                result["family_scores"]["grok"] = (
+                    result["family_scores"].get("grok", 0) + ring_score
+                )
+        except Exception:
+            pass
+
+        # K. NUEVO V10: Simetría bilateral anormal → IA genérica
+        try:
+            bsym = features.get("bilateral_symmetry")
+            if bsym is not None and bsym > 0.85:
+                sym_score = min(25.0, (bsym - 0.85) * 180.0)
+                result["signals"].append(
+                    f"Simetría bilateral anormal (corr={bsym:.3f}) → generación IA"
+                )
+                for fam in ["grok", "dalle", "midjourney"]:
+                    result["family_scores"][fam] = (
+                        result["family_scores"].get(fam, 0) + sym_score * 0.33
+                    )
+        except Exception:
+            pass
+
+        # L. NUEVO V10: Distribución uniforme de bordes → IA
+        try:
+            eqr = features.get("edge_quad_ratio")
+            if eqr is not None and eqr < 0.15:
+                edge_score = min(20.0, (0.15 - eqr) * 150.0)
+                result["signals"].append(
+                    f"Bordes distribuidos uniformemente (eqr={eqr:.3f}) → sin foco óptico → IA"
+                )
+                result["family_scores"]["grok"] = (
+                    result["family_scores"].get("grok", 0) + edge_score * 0.5
+                )
+                result["family_scores"]["dalle"] = (
+                    result["family_scores"].get("dalle", 0) + edge_score * 0.3
+                )
+                result["family_scores"]["flux"] = (
+                    result["family_scores"].get("flux", 0) + edge_score * 0.2
+                )
+        except Exception:
+            pass
+
+        # Consolidar familia dominante
+        if result["family_scores"]:
+            lap_v = features.get("laplacian_var")
+            gd_v  = features.get("green_channel_dominance")
+            bcs_v = features.get("block_consistency_std")
+            ca_v  = features.get("chromatic_aberration")
+            lte_v = features.get("local_texture_entropy")
+
+            is_pro_sharp = False
+            if lap_v is not None and lap_v > 800.0:
+                if (gd_v is not None and gd_v >= 1.15) or \
+                   (bcs_v is not None and bcs_v > 800.0) or \
+                   (ca_v is not None and ca_v >= 0.35):
+                    is_pro_sharp = True
+            
+            # V10.3: No restringir si la convergencia de familia es muy fuerte o IA confirmada por textura
+            if is_pro_sharp:
+                top_temp = max(result["family_scores"].values()) if result["family_scores"] else 0
+                if top_temp > 70.0 or (lte_v is not None and lte_v < 1.3):
+                    is_pro_sharp = False
+                    result["signals"].append("⚠️ Firma espectral liberada: Evidencia micro-estructural IA detectada.")
+
+            if is_pro_sharp:
+                for fam in result["family_scores"]:
+                    result["family_scores"][fam] *= 0.15
+                result["signals"].append("Firma espectral restringida al 15% (nitidez de sensor óptico confirmada)")
+
+            top = max(result["family_scores"].items(), key=lambda x: x[1])
+            result["top_family"] = top[0]
+            result["top_score"]  = round(top[1], 1)
+
         return result
 
-    def _clip_score(self, img_pil):
-        """
-        Prompts específicos de Aurora/Grok para discriminación semántica.
-        Usa torch.inference_mode() (más rápido que no_grad en PyTorch moderno)
-        y mueve tensores al dispositivo correcto.
-        """
-        if self.clip_model is None:
-            return None
-        try:
-            dev = "cuda" if self.device == 0 else "cpu"
-            image = self.clip_preprocess(img_pil).unsqueeze(0).to(dev)
 
-            prompts = [
-                # ── Reales ──
-                "an authentic photograph taken with a DSLR camera with natural sensor noise, "
-                "genuine optical lens aberrations, and physically accurate lighting",
-                "a candid real-world photo with authentic film grain, imperfect focus, "
-                "random micro-textures and genuine color fringing from a real lens",
-                # ── IA genérica ──
-                "an AI generated image with synthetic over-smoothed textures and unnatural "
-                "perfect lighting created by a latent diffusion model",
-                # ── Grok Aurora específico ──
-                "a hyper-realistic image generated by Grok Aurora from xAI with perfect skin "
-                "texture, artificially smooth gradients, and VAE checkerboard artifacts",
-                "a synthetic portrait generated by the Aurora diffusion model with impossibly "
-                "smooth skin, perfect symmetry, and latent space color bleeding",
-                # ── Flux/Aurora VAE ──
-                "an image produced by a Flux or Aurora VAE decoder with chroma blur, "
-                "bimodal sharpness distribution and over-saturated local colors",
-            ]
-            text = self.clip_tokenizer(prompts).to(dev)
 
-            with torch.inference_mode():  # más rápido que no_grad en PyTorch >= 1.9
-                img_f = self.clip_model.encode_image(image)
-                txt_f = self.clip_model.encode_text(text)
-                img_f /= img_f.norm(dim=-1, keepdim=True)
-                txt_f /= txt_f.norm(dim=-1, keepdim=True)
-                sim = (img_f @ txt_f.T).softmax(dim=-1)[0]
+# ═══════════════════════════════════════════════════════════════
+# MÓDULO 6: CLASIFICADOR GROK INDEPENDIENTE (V10.2)
+# ═══════════════════════════════════════════════════════════════
+class GrokClassifier:
+    """
+    Clasificador independiente para Grok/Aurora/Flux/Gemini.
+    Opera en un pipeline SEPARADO del MetaClassifier para evitar
+    que la detección de Grok cause falsos positivos en fotos reales.
 
-            real_score = float(sim[0] + sim[1])
-            ai_score   = float(sim[2] + sim[3] + sim[4] + sim[5])
+    Principio: si la imagen tiene EXIF de cámara → 0% inmediato.
+    Si no tiene EXIF, evalúa 10 señales forenses específicas de IA.
+    """
 
-            total = real_score + ai_score
-            if total == 0:
-                return None
-            return (ai_score / total) * 100
-        except Exception as e:
-            logger.debug(f"CLIP falló en predicción: {e}")
-            return None
+    @staticmethod
+    def classify(
+        features: Dict[str, float],
+        metadata: Optional[Dict[str, Any]],
+        img_size: Tuple[int, int],
+    ) -> Tuple[float, List[str]]:
+        """Retorna (probabilidad_grok, señales)."""
 
-    # ─────────────────────────────────────────────
-    # PUNTUACIÓN FORENSE CALIBRADA
-    # ─────────────────────────────────────────────
+        # ── GATE 1: EXIF de cámara real → imposible que sea Grok ────
+        if metadata and metadata.get("real_camera"):
+            return 0.0, ["Clasificador Grok: EXIF de cámara real → descartado"]
 
-    def _forensic_score(self, f_data, residual_noise, faces, gray, img_cv, has_exif_optical):
-        """
-        Sistema de puntuación forense recalibrado.
-        Cada métrica tiene el doble de peso que antes.
-        Se añade penalización por ausencia de EXIF óptico (la señal más barata y confiable).
-        """
-        score = 0.0
-        reasons = []
-        cfg = self.config
+        # ── GATE 2: IA confirmada por metadata → ya resuelta ────────
+        if metadata and metadata.get("confirmed_ai"):
+            return 95.0, [f"Clasificador Grok: IA confirmada ({metadata.get('generator', '?')})"]
 
-        # ─── NOTA EXIF ───────────────────────────────────────────────────────
-        # NO añadimos puntos por ausencia de EXIF porque fotos reales enviadas
-        # por WhatsApp, Instagram, Twitter, etc. siempre pierden su EXIF.
-        # Solo usamos el EXIF como evidencia positiva (ya manejado en process_image).
+        score  = 0.0
+        max_sc = 0.0
+        signals: List[str] = []
 
-        # ─── GRADIENTE PLANO ─────────────────────────────────────────────────
-        # Fotos reales: fondos uniformes pueden tener 50-70% de gradiente~0.
-        # IA tipo Aurora: 80-95% de gradiente~0 (todo es demasiado suave).
-        grad_flat  = f_data.get("grad_flat", 0.0)
-        grad_var   = f_data.get("grad_var", 9999.0)
-        if grad_flat > 0.82:              # umbral alto: solo dispara en IA extrema
-            score += 28
-            reasons.append(f"Gradientes extremadamente planos ({grad_flat*100:.0f}%) → IA")
-        elif grad_flat > 0.72:
-            score += 12
-            reasons.append(f"Gradientes muy uniformes ({grad_flat*100:.0f}%)")
-        if grad_var < 200:                # varianza muy baja = demasiado uniforme
-            score += 18
-            reasons.append(f"Campo de gradiente casi constante (var={grad_var:.0f})")
-        elif grad_var < 600:
-            score += 7
-            reasons.append(f"Campo de gradiente poco variable (var={grad_var:.0f})")
+        has_exif = bool(metadata and metadata.get("has_any_exif", False))
 
-        # ─── RUIDO EN ZONAS LISAS ────────────────────────────────────────────
-        # NOTA CRÍTICA: JPEG destruye el ruido ISO en zonas lisas. Por eso
-        # incluso fotos reales pueden tener σ < 2.0 después de compresión JPEG.
-        # Solo flagear si el ruido es PRÁCTICAMENTE CERO (σ < 0.5),
-        # que indica generación perfecta por VAE sin ningún ruido digital.
-        smooth_noise = f_data.get("smooth_noise", 50.0)
-        if smooth_noise < 0.4:            # esencialmente cero = VAE generativo
-            score += 30
-            reasons.append(f"Zonas lisas perfectas sin ruido (σ={smooth_noise:.2f}) → VAE")
-        elif smooth_noise < 0.8:
-            score += 14
-            reasons.append(f"Ruido muy bajo en zonas lisas (σ={smooth_noise:.2f})")
+        # ── 1. Sin EXIF (señal débil pero necesaria) ────────────────
+        if not has_exif:
+            score += 15.0
+            signals.append("Sin EXIF fotográfico")
+        max_sc += 15.0
 
-        # ─── CORRELACIÓN DE CANALES ──────────────────────────────────────────
-        # Fotos reales pueden tener correlación 0.70-0.93 (depende del sujeto).
-        # JPEG además mezcla canales. Solo flagear correlación EXTREMA (>0.97).
-        chan_corr = f_data.get("chan_corr", 0.0)
-        if chan_corr > 0.97:
-            score += 22
-            reasons.append(f"Canales RGB perfectamente correlacionados ({chan_corr:.3f}) → IA")
-        elif chan_corr > 0.94:
-            score += 9
-            reasons.append(f"Alta correlacion de canales ({chan_corr:.3f})")
+        # ── 1b. Detección de Gráficos Digitales / UI (Screenshot) ────
+        # Si tiene muy pocos colores y sombras perfectas, es probable que
+        # sea una captura de pantalla, no una foto ni IA.
+        cc_val = features.get("color_cluster_count")
+        se_val = features.get("shadow_entropy")
+        is_digital_ui = False
+        if cc_val is not None and se_val is not None:
+            is_digital_ui = bool(cc_val <= 3 and se_val > 4.8)
+        
+        if is_digital_ui:
+            signals.append("🔍 Detectado Gráfico Digital/UI (no foto)")
 
-        # ─── TEXTURA ──────────────────────────────────────────────────
-        ts = f_data["texture_score"]
-        if ts < cfg["texture_thresholds"][0]:
-            score += 30
-            reasons.append(f"Textura sintética uniforme (score={ts:.1f})")
-        elif ts < cfg["texture_thresholds"][1]:
-            score += 14
-            reasons.append(f"Textura ligeramente sintética (score={ts:.1f})")
+        # ── 2. Resolución nativa de generador IA ────────────────────
+        w, h = img_size
+        if (w, h) in _AI_NATIVE_RESOLUTIONS_SET:
+            score += 15.0
+            max_sc += 15.0
+            signals.append(f"Resolución nativa IA: {w}×{h}")
 
-        # ─── RUIDO RESIDUAL ─────────────────────────────────────────────
-        rn = residual_noise
-        if rn < cfg["noise_thresholds"][0]:
-            score += 25
-            reasons.append(f"Ruido residual casi nulo (rn={rn:.1f}) → motor difusión")
-        elif rn > cfg["noise_thresholds"][2]:
-            score += 18
-            reasons.append(f"Ruido residual excesivo/plano (rn={rn:.1f})")
-        elif rn < cfg["noise_thresholds"][1]:
-            score += 12
-            reasons.append(f"Ruido residual bajo (rn={rn:.1f})")
+        # ── 3-12. Señales forenses (cada una con su peso) ───────────
+        # V10.3: Evaluación secuencial para evitar duplicidad de pesos
+        checks_nested = [
+            ("local_texture_entropy", [
+                (lambda v: v < 1.0, 30.0, "Textura microscópica NULA (Confirmación IA)"),
+                (lambda v: v < 1.8, 20.0, "Textura microescala artificial (Grok/Flux)"),
+                (lambda v: v < 3.8, 12.0, "Textura microescala suave")
+            ]),
+            ("fft_midband_ring", [
+                (lambda v: v > 3.2, 28.0, "Ringing mid-band CRÍTICO (Confirmación IA)"),
+                (lambda v: v > 2.2, 18.0, "Ringing mid-band del upsampler"),
+                (lambda v: v > 1.5, 10.0, "Ringing espectral leve")
+            ]),
+            ("noise_level", [
+                (lambda v: v < 1.0, 15.0, "Ruido sintéticamente bajo (Grok/Flux)"),
+                (lambda v: v < 1.8, 8.0,  "Luminancia suave")
+            ]),
+        ]
 
-        # ─── FFT ────────────────────────────────────────────────────
-        fft = f_data["fft_ratio"]
-        if fft < cfg["fft_thresholds"][0]:
-            score += 25
-            reasons.append(f"FFT aplanado (ratio={fft:.2f})")
-        elif fft < cfg["fft_thresholds"][1]:
-            score += 10
-            reasons.append(f"FFT levemente aplanado (ratio={fft:.2f})")
+        # Señales binarias simples
+        checks_flat = [
+            ("shadow_entropy",        lambda v: v < 2.5,   12.0, "Sombras sintéticas"),
+            ("gradient_smoothness",   lambda v: v < 8.0,   10.0, "Gradientes artificialmente suaves"),
+            ("dct_block_uniformity",  lambda v: v < 25.0,  10.0, "DCT uniforme"),
+            ("green_channel_dominance", lambda v: v < 1.10, 10.0, "Sin dominancia verde (no Bayer)"),
+            ("color_cluster_count",   lambda v: v <= 5,     8.0, "Paleta de color estrecha"),
+            ("bilateral_symmetry",    lambda v: v > 0.85,   8.0, "Simetría bilateral anormal"),
+        ]
 
-        # ─── COLOR ────────────────────────────────────────────────────
-        cv = f_data["color_var"]
-        if cv < cfg["color_var_threshold"]:
-            score += 12
-            reasons.append(f"Saturación cromática anómala (var={cv:.0f})")
+        conditions_met = 0
+        if not has_exif:
+             conditions_met += 1 # Sin EXIF es media señal
 
-        # ─── ELA ─────────────────────────────────────────────────────
-        ela = f_data["ela_var"]
-        if ela < cfg["ela_threshold"]:
-            score += 10
-            reasons.append("ELA plano → imagen no comprimida orgánicamente")
+        for feat_name, thresholds in checks_nested:
+            val = features.get(feat_name)
+            if val is not None:
+                max_sc += thresholds[0][1] # El peso máximo posible para esta feature
+                for check_fn, weight, label in thresholds:
+                    if check_fn(val):
+                        score += weight
+                        conditions_met += 1
+                        signals.append(f"{label} ({feat_name}={val:.2f})")
+                        break
 
-        # ─── SIMETRÍA FACIAL ───────────────────────────────────────────
-        if len(faces) > 0:
-            sym = self._face_symmetry(gray, faces)
-            if sym is not None and sym < cfg["symmetry_threshold"]:
-                score += 20
-                reasons.append(f"Simetría facial casi perfecta (diff={sym:.2f})")
-            liveness = self._face_liveness(img_cv, faces)
-            if liveness > 0.5:
-                score -= 8
-                reasons.append(f"Posible rostro real (liveness={liveness:.2f})")
+        for feat_name, check_fn, weight, label in checks_flat:
+            val = features.get(feat_name)
+            if val is not None:
+                max_sc += weight
+                if check_fn(val):
+                    score += weight
+                    conditions_met += 1
+                    signals.append(f"{label} ({feat_name}={val:.2f})")
 
-        # ─── ROLLOFF ESPECTRAL ───────────────────────────────────────
-        rolloff = f_data.get("rolloff", 1.0)
-        if rolloff > cfg["rolloff_thresholds"][1]:
-            score += 18
-            reasons.append(f"Decaimiento espectral anómalo (Firma VAE, ratio={rolloff:.1f})")
-        elif rolloff > cfg["rolloff_thresholds"][0]:
-            score += 9
-            reasons.append(f"Frecuencias ultra-altas ausentes (ratio={rolloff:.1f})")
+        ca_val = features.get("chromatic_aberration")
+        lte_val = features.get("local_texture_entropy")
+        fft_ring = features.get("fft_midband_ring")
 
-        # ─── ENTROPÍA LOCAL ───────────────────────────────────────────
-        ent = f_data.get("entropy_var", 5000)
-        if ent < cfg["entropy_threshold"]:
-            score += 15
-            reasons.append(f"Micro-textura con over-smoothing (var={ent:.0f})")
-
-        # ─── SRM ───────────────────────────────────────────────────────
-        srm = f_data.get("srm_noise", 9999.0)
-        srm_thresh = cfg.get("srm_threshold", 3.0)
-        if srm < srm_thresh:
-            score += 18
-            reasons.append(f"SRM residual bajo → motor generativo (var={srm:.2f})")
-        elif srm < srm_thresh * 2:
-            score += 8
-            reasons.append(f"SRM residual levemente bajo (var={srm:.2f})")
-
-        # ─── BLOCKINESS ────────────────────────────────────────────────
-        blockiness = f_data.get("blockiness", 0)
-        if blockiness > 5.0:
-            score += 6
-            reasons.append(f"Blockiness JPEG elevado ({blockiness:.2f})")
-
-        return min(score, 100.0), reasons
-
-    # ---------------- MAIN ----------------
-
-    def process_image(self, data, verbose=False):
-        try:
-            img_pil = Image.open(io.BytesIO(data)).convert("RGB")
-            img_cv  = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-            gray    = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-
-            h, w = gray.shape
-            if h < 32 or w < 32:
-                return {"status": "error", "error": "Imagen muy pequeña"}
-
-            # -- 1. EXIF -------------------------------------------------
-            has_real, has_ai = self._check_exif(img_pil)
-            if has_ai:
-                return {"status": "success", "probabilidad": 99,
-                        "nota": "Firma IA en EXIF", "fuente": "exif"}
-            if has_real:
-                return {"status": "success", "probabilidad": 5,
-                        "nota": "EXIF optico detectado (Probable Real)", "fuente": "exif"}
-
-            # -- 2. MODELOS NEURALES ------------------------------------
-            s1   = self._score_model(self.detector1, img_pil)
-            s2   = self._score_model(self.detector2, img_pil)
-            s3   = self._score_model(self.detector3, img_pil)
-            clip = self._clip_score(img_pil)
-
-            s1_raw, s2_raw, s3_raw = s1, s2, s3
-
-            s1   = s1   if s1   is not None else 50.0
-            s2   = s2   if s2   is not None else 50.0
-            s3   = s3   if s3   is not None else 50.0
-            clip = clip if clip is not None else 50.0
-
-            weights    = self.config["model_weights"]
-            neural_avg = (
-                s1 * weights["detector1"]
-                + s2 * weights["detector2"]
-                + s3 * 0.10
-                + clip * weights["clip"]
+        # Condición de "Convergencia IA Indiscutible"
+        is_extreme_ai = False
+        if lte_val is not None:
+            is_extreme_ai = bool(
+                (conditions_met >= 7) or
+                (lte_val < 0.3) or
+                (fft_ring is not None and lte_val < 1.8 and fft_ring > 2.8 and conditions_met >= 4)
             )
 
-            # -- 3. FORENSE + GROK -------------------------------------
-            residual_noise = self._residual_noise(gray)
-            faces  = self._detect_faces(gray)
-            f_data = self._forensics(img_pil, img_cv, gray)
+        lap   = features.get("laplacian_var")
+        gd    = features.get("green_channel_dominance")
+        b_std = features.get("block_consistency_std")
 
-            forensic_score, forensic_reasons = self._forensic_score(
-                f_data, residual_noise, faces, gray, img_cv,
-                has_exif_optical=False,   # ya salimos arriba si tenia EXIF real
-            )
-            grok_score, grok_reasons = self._grok_aurora_signature(
-                img_pil, img_cv, gray
-            )
+        # Escudo pro-óptico: requiere que las biometrías existan y den positivo
+        is_pro_sharp = False
+        if lap is not None and lap > 800.0:
+            if (gd is not None and gd >= 1.15) or \
+               (b_std is not None and b_std > 800.0) or \
+               (ca_val is not None and ca_val >= 0.35):
+                is_pro_sharp = True
 
-            # -- 4. ENSEMBLE ADAPTATIVO ---------------------------------
-            # Regla 1: neural tiene peso bajo (25%), no conoce Aurora/Grok.
-            # Regla 2: si ningun modelo > 60% -> peso neural se reduce a 10%.
-            # Regla 3: pisos minimos garantizados por forensic/grok.
-            unr = self.config.get("neural_unreliable_threshold", 60.0)
-            neural_raw_scores = [v for v in [s1_raw, s2_raw, s3_raw] if v is not None]
-            neural_uncertain  = (not neural_raw_scores
-                                 or max(neural_raw_scores) < unr)
-
-            if neural_uncertain:
-                w_n, w_f, w_g = 0.10, 0.58, 0.32
-                mode = "forense-dominante"
+        # V10.3: El escudo se debilita si hay señales micro-estructurales IA extremas
+        # o si hay una convergencia masiva de señales.
+        if is_pro_sharp:
+            if is_extreme_ai or conditions_met >= 9:
+                is_pro_sharp = False
+                signals.append("⚠️ Escudo Pro-óptico desactivado por convergencia IA indiscutible.")
             else:
-                ew = self.config.get("ensemble_weights",
-                                     {"neural": 0.25, "forensic": 0.45, "grok": 0.30})
-                w_n, w_f, w_g = ew["neural"], ew["forensic"], ew["grok"]
-                mode = "equilibrado"
+                score = score * 0.35
+                signals.append("🛡 Escudo Pro-óptico: Señales suavizadas/Ringing asumen origen en post-proceso de cámara real.")
 
-            prob = neural_avg * w_n + forensic_score * w_f + grok_score * w_g
+        # Aplicar penalizaciones (solo si NO es IA extrema confirmada micro-estructuralmente)
+        if not is_extreme_ai:
+            penalties = [
+                ("chromatic_aberration",   lambda v: v > 1.0,   25.0),
+                ("chromatic_aberration",   lambda v: v > 0.5,   15.0),
+                ("noise_level",            lambda v: v > 2.5,   25.0),
+                ("laplacian_var",          lambda v: v > 4000,  20.0),
+                ("local_texture_entropy",  lambda v: v > 5.5,   30.0),
+            ]
+            for feat_name, check_fn, weight in penalties:
+                val = features.get(feat_name)
+                if val is not None and check_fn(val):
+                    score = max(0.0, score - weight)
+        else:
+            signals.append("🔍 Penalizaciones orgánicas anuladas por confirmación micro-estructural IA")
 
-            # Pisos minimos garantizados
-            if forensic_score >= 70:
-                prob = max(prob, 72.0)
-                forensic_reasons.append(
-                    f"Nivel forense critico -> piso=72 (score={forensic_score:.0f})"
+        # ── Calcular probabilidad ───────────────────────────────────
+        prob = (score / max_sc) * 100.0 if max_sc > 0 else 0.0
+
+        # ── Bonus por convergencia
+        if conditions_met >= 9 and not has_exif:
+            prob = min(100.0, prob * 1.25)
+        elif conditions_met >= 6 and not has_exif:
+            prob = min(100.0, prob * 1.10)
+
+        if ca_val is not None and ca_val > 0.6 and not is_extreme_ai and conditions_met < 6:
+            prob = min(prob, 35.0)
+            if not any("Aberración cromática" in s for s in signals):
+                signals.append(f"🔍 Freno forense: Aberración cromática detectada ({ca_val:.2f})")
+
+
+        # Digital UI (Screenshot) freno adicional
+        if is_digital_ui:
+            prob = min(prob, 25.0)
+
+        if has_exif:
+            prob = min(prob, 30.0)
+
+        prob, signals = round(prob, 1), signals
+        
+        # Escudo Social Media: Si no hay EXIF y es sospechosa de ser redes sociales, 
+        # bajamos la confianza de señales que la compresión imita.
+        if metadata and metadata.get("is_social_media") and not metadata.get("confirmed_ai"):
+            # Si el veredicto es IA pero no es "Extrema", bajamos la prob
+            if prob > 50 and not is_extreme_ai:
+                prob = prob * 0.7  # Reducción del 30%
+                signals.append("🛡 Escudo Social Media: Probabilidad reducida por posible compresión de red social")
+
+        return prob, signals
+
+
+# ═══════════════════════════════════════════════════════════════
+# MÓDULO 2: META-CLASIFICADOR
+# ═══════════════════════════════════════════════════════════════
+class MetaClassifier:
+    """Sistema probabilístico unificado por agregación ponderada de señales."""
+
+    def __init__(self, config: Optional[ThresholdConfig] = None):
+        self.cfg = config or ThresholdConfig()
+
+    def evaluate(
+        self,
+        features:    Dict[str, Any],
+        nn_prob:     float,
+        metadata:    Optional[Dict[str, Any]] = None,
+        ela:         Optional[Dict[str, Any]] = None,
+        fingerprint: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[float, str, str, List[str]]:
+        cfg      = self.cfg
+        score    = 0.0
+        max_sc   = 0.0
+        reasons: List[str] = []
+        is_social = bool(metadata and metadata.get("is_social_media"))
+        has_real_cam = bool(metadata and metadata.get("real_camera"))
+
+        # V10.3: Pre-conteo de señales IA para bypass de escudos
+        # V10.3: Pre-conteo de señales IA para bypass de escudos (con pesos dinámicos)
+        def count_ai_sigs(rs):
+            c = 0
+            for r in rs:
+                rl = r.lower()
+                if "nativa ia" in rl or "native ia" in rl: c += 3
+                elif "firma ia" in rl: c += 5
+                elif any(x in rl for x in ["artificial", "ia", "ringing", "espectral", "sintética"]):
+                    c += 1
+            return c
+
+        # ── A: SHADOW ENTROPY ──────────────────────────────────────
+        s_ent = features.get("shadow_entropy")
+        if s_ent is not None:
+            max_sc += cfg.shadow_entropy_weight
+            if s_ent < cfg.shadow_entropy_ai_max:
+                p = min(cfg.shadow_entropy_weight, (cfg.shadow_entropy_ai_max - s_ent) * 45.0)
+                score += p
+                reasons.append(f"Sombras sintéticamente puras (E={s_ent:.2f})")
+            elif s_ent > cfg.shadow_entropy_real_min:
+                score -= 15.0
+
+        # ── C: RUIDO RESIDUAL — condicional a EXIF/Social Media ─────
+        noise = features.get("noise_level")
+        if noise is not None:
+            max_sc += cfg.noise_weight
+            noise_thr = 1.2 if has_real_cam else (cfg.noise_ai_max * 0.7 if is_social else cfg.noise_ai_max)
+            if noise < noise_thr:
+                p = min(cfg.noise_weight, (noise_thr - noise) * 35.0)
+                score += p
+                reasons.append(f"Carencia anómala de luminancia (n={noise:.2f})")
+
+        # ── D: FFT RATIO ───────────────────────────────────────────
+
+        # ── D: FFT RATIO ───────────────────────────────────────────
+        fft_ratio = features.get("fft_ratio")
+        if fft_ratio is not None:
+            max_sc += cfg.fft_weight
+            if fft_ratio > cfg.fft_ai_min:
+                p = min(cfg.fft_weight, (fft_ratio - cfg.fft_ai_min) * 100.0)
+                score += p
+                reasons.append(f"Patrón de reconstrucción espectral (FFT={fft_ratio:.2f})")
+
+        # ── G: HOMOGENEIDAD DE COLOR — condicional a EXIF ──────────
+        sat_var  = features.get("saturation_var")
+        val_var  = features.get("value_var")
+        sat_mean = features.get("saturation_mean")
+        
+        if sat_var is not None and val_var is not None and sat_mean is not None:
+            image_has_color = sat_mean > 25.0
+            grok_w_eff = cfg.grok_weight if not has_real_cam else cfg.grok_weight * 0.20
+            max_sc += grok_w_eff
+            if image_has_color and sat_var < cfg.grok_sat_max and val_var < cfg.grok_val_max:
+                p = min(grok_w_eff, (cfg.grok_val_max - val_var) * 0.12 + (cfg.grok_sat_max - sat_var) * 0.20)
+                score += p
+                reasons.append(
+                    f"Uniformidad de color {'(sin EXIF) ' if not has_real_cam else '(EXIF, reducido) '}"
+                    f"(sat_var={sat_var:.0f}, val_var={val_var:.0f})"
                 )
-            elif forensic_score >= 55:
-                prob = max(prob, 60.0)
-                forensic_reasons.append(
-                    f"Nivel forense alto -> piso=60 (score={forensic_score:.0f})"
+
+        # ── E: ELA — reducido si hay EXIF de cámara ─────────────────
+        if ela:
+            ela_region_std = ela.get("ela_region_std")
+            ela_mean_v     = ela.get("ela_mean")
+            ela_uniformity = ela.get("ela_uniformity")
+            
+            if ela_region_std is not None and ela_mean_v is not None:
+                ela_w_eff = cfg.ela_weight * (0.30 if has_real_cam else 1.0)
+                max_sc += ela_w_eff
+
+                if ela_region_std < cfg.ela_region_std_ai_max and ela_mean_v > cfg.ela_mean_ai_min:
+                    ela_sc = min(
+                        ela_w_eff,
+                        (cfg.ela_region_std_ai_max - ela_region_std)
+                        / cfg.ela_region_std_ai_max
+                        * ela_w_eff
+                        * (ela_uniformity ** 1.5 if ela_uniformity is not None else 1.0),
+                    )
+                    score += ela_sc
+                    reasons.append(
+                        f"ELA uniforme (region_std={ela_region_std:.2f}, mean={ela_mean_v:.2f})"
+                    )
+                elif ela.get("partial_ai_suspected"):
+                    score += ela_w_eff * 0.85
+                    hspot = ela.get("tampered_hotspot") or {}
+                    reasons.append(
+                        f"Inpainting/Manipulación Regional "
+                        f"[X:{hspot.get('x', 0):.2f}, Y:{hspot.get('y', 0):.2f}] "
+                        f"(Error:{hspot.get('error_score', 0)})"
+                    )
+                elif ela_region_std > cfg.ela_region_std_ai_max * 2.5:
+                    score -= 20.0
+                    reasons.append(f"ELA heterogéneo (region_std={ela_region_std:.2f}) → compresión previa")
+
+        # ── F: METADATA ────────────────────────────────────────────
+        if metadata:
+            if metadata.get("confirmed_ai"):
+                score  += cfg.metadata_confirmed_ai_weight
+                max_sc += cfg.metadata_confirmed_ai_weight
+                reasons.extend(metadata.get("signals", []))
+                reasons.append(f"Generador: {metadata.get('generator', 'IA desconocida')}")
+
+            elif metadata.get("c2pa_present") and not metadata.get("c2pa_ai_signed"):
+                score  += cfg.metadata_c2pa_unsigned_weight
+                max_sc += cfg.metadata_c2pa_unsigned_weight
+                reasons.append("C2PA sin firma IA conocida (origen ambiguo)")
+
+            elif metadata.get("real_camera"):
+                extra_fields = metadata.get("real_camera_field_count", 0)
+                bonus  = min(extra_fields * 5.0, 25.0)
+                total  = cfg.metadata_real_camera_weight - bonus
+                score  += total
+                max_sc += abs(total)
+                reasons.extend(metadata.get("signals", []))
+            else:
+                max_sc += 10.0
+
+        # ── H: AUSENCIA DE EXIF (nueva V9) ─────────────────────────
+        if metadata:
+            has_any_exif = metadata.get("has_any_exif", False)
+            has_cam_make = bool(
+                metadata.get("real_camera") or
+                (metadata.get("raw_fields", {}).get("exif", {}).get("Make"))
+            )
+            if not has_any_exif and not metadata.get("confirmed_ai"):
+                score  += 4.0
+                max_sc += 15.0
+                reasons.append("Sin EXIF fotográfico (imagen descargada/huérfana)")
+            elif has_any_exif and not has_cam_make:
+                score  += 6.0
+                max_sc += 10.0
+
+        # ── K: ABERRACIÓN CROMÁTICA (nueva V9) ─────────────────────
+        ca_score = features.get("chromatic_aberration")
+        if ca_score is not None:
+            max_sc += cfg.ca_weight
+            if ca_score < cfg.ca_ai_max and not has_real_cam:
+                if block_std is not None and block_std < 800.0:
+                    p = min(cfg.ca_weight, (cfg.ca_ai_max - ca_score) * 60.0)
+                    score += p
+                    reasons.append(f"Sin aberración cromática (CA={ca_score:.3f}) → alineación pixel perfecta (IA)")
+                else:
+                    reasons.append(f"Óptica limpia sin aberración (lente alta resolución deportiva)")
+            elif ca_score >= cfg.ca_ai_max:
+                score -= 10.0
+
+        # ── L: ENTROPÍA LOCAL DE TEXTURA (nueva V9) ────────────────
+        lte = features.get("local_texture_entropy")
+        if lte is not None:
+            max_sc += cfg.local_entropy_weight
+            if lte < cfg.local_entropy_ai_max:
+                p = min(cfg.local_entropy_weight, (cfg.local_entropy_ai_max - lte) * 15.0)
+                score += p
+                reasons.append(f"Textura microscópica artificial (lte={lte:.2f})")
+            elif lte > 5.5:
+                score -= 12.0
+
+        # ── M: DOMINANCIA DE CANAL VERDE (nueva V9) ────────────────
+        gd = features.get("green_channel_dominance")
+        if gd is not None:
+            if gd > 1.3:
+                score -= 15.0
+                reasons.append(f"Dominancia canal verde (gd={gd:.2f}) → sensor Bayer real")
+            elif gd < 1.05 and not has_real_cam and (sat_mean is not None and sat_mean < 180):
+                score += 10.0
+                max_sc += 10.0
+                reasons.append(f"Sin dominancia canal verde (gd={gd:.2f}) → sin sensor Bayer")
+
+        # ── N: SIMETRÍA BILATERAL (nueva V10) ──────────────────────
+        bsym = features.get("bilateral_symmetry")
+        if bsym is not None:
+            max_sc += cfg.bilateral_symmetry_weight
+            if bsym > cfg.bilateral_symmetry_ai_min and not has_real_cam:
+                p = min(cfg.bilateral_symmetry_weight, (bsym - cfg.bilateral_symmetry_ai_min) * 130.0)
+                score += p
+                reasons.append(f"Simetría bilateral anormal (corr={bsym:.3f}) → IA")
+            elif bsym < 0.4:
+                score -= 5.0
+
+        # ── O: CLUSTERING DE PALETA (nueva V10) ────────────────────
+        cc = features.get("color_cluster_count")
+        hs_feat = features.get("color_hue_spread")
+        if cc is not None:
+            max_sc += cfg.color_cluster_weight
+            if cc <= cfg.color_cluster_ai_max and (hs_feat is not None and hs_feat < 50.0) and not has_real_cam:
+                p = min(cfg.color_cluster_weight, (cfg.color_cluster_ai_max + 1 - cc) * 4.0)
+                score += p
+                reasons.append(f"Paleta de color estrecha ({cc} clusters, hue={hs_feat:.0f}°) → generación IA")
+
+        # ── P: FFT MID-BAND RINGING (nueva V10) ────────────────────
+        mbr = features.get("fft_midband_ring")
+        if mbr is not None:
+            max_sc += cfg.fft_midband_ring_weight
+            if mbr > cfg.fft_midband_ring_min and not has_real_cam:
+                p = min(cfg.fft_midband_ring_weight, (mbr - cfg.fft_midband_ring_min) * 20.0)
+                score += p
+                reasons.append(f"Ringing espectral mid-band (ratio={mbr:.2f}) → artefacto upsampler")
+
+        # ── Q: VARIANZA DE BORDES POR CUADRANTE (nueva V10) ────────
+        eqr = features.get("edge_quad_ratio")
+        if eqr is not None:
+            max_sc += cfg.edge_variance_weight
+            if eqr < cfg.edge_variance_ratio_ai_max * 0.15 and not has_real_cam:
+                p = min(cfg.edge_variance_weight, (0.20 - eqr) * 80.0)
+                score += p
+                reasons.append(f"Distribución uniforme de bordes (eqr={eqr:.3f}) → sin foco óptico")
+            elif eqr > 0.5:
+                score -= 8.0
+
+
+        # ── I: FINGERPRINT ESPECTRAL ────────────────────────────────
+        if fingerprint:
+            top_sc  = fingerprint.get("top_score", 0.0)
+            top_fam = fingerprint.get("top_family", "")
+            if top_sc > 15.0:
+                fp_contrib = min(60.0, top_sc * 1.5)
+                score  += fp_contrib
+                max_sc += 45.0
+                reasons.extend(fingerprint.get("signals", []))
+                if top_fam:
+                    reasons.append(f"Fingerprint espectral: '{top_fam}' (score={top_sc:.1f})")
+            elif top_sc > 5.0:
+                score  += top_sc * 1.0
+                max_sc += 20.0
+                reasons.extend(fingerprint.get("signals", []))
+
+        # ── J: GROK/AURORA — DETECTOR POR INTERSECCIÓN V10 ─────────
+        grok_n = 0
+        grok_ev: List[str] = []
+
+        noise2     = features.get("noise_level")
+        shadow_e   = features.get("shadow_entropy")
+        grad_sm    = features.get("gradient_smoothness")
+        dct_uni    = features.get("dct_block_uniformity")
+        sat_mean2  = features.get("saturation_mean")
+        sat_var2   = features.get("saturation_var")
+
+        if noise2 is not None and noise2 < cfg.grok_noise_max:
+            grok_n += 1
+            grok_ev.append(f"ruido casi cero (n={noise2:.2f})")
+        if shadow_e is not None and shadow_e < cfg.grok_shadow_entropy_max:
+            grok_n += 1
+            grok_ev.append(f"sombras sintéticas (E={shadow_e:.2f})")
+        if grad_sm is not None and grad_sm < cfg.grok_gradient_smoothness_max:
+            grok_n += 1
+            grok_ev.append(f"gradiente sintético (var={grad_sm:.2f})")
+        if dct_uni is not None and dct_uni < cfg.grok_dct_uniformity_max:
+            grok_n += 1
+            grok_ev.append(f"DCT uniforme (std={dct_uni:.2f})")
+        if metadata:
+            if not has_real_cam and not metadata.get("has_any_exif", False):
+                grok_n += 1
+                grok_ev.append("sin EXIF fotográfico")
+        if sat_mean2 is not None and sat_var2 is not None:
+            if sat_mean2 > 20.0 and sat_var2 < cfg.grok_sat_max:
+                grok_n += 1
+                grok_ev.append(f"color uniforme (sat_mean={sat_mean2:.0f}, sat_var={sat_var2:.0f})")
+        if lte is not None and lte < 3.8:
+            grok_n += 1
+            grok_ev.append(f"entropía microescala extrema (lte={lte:.2f})")
+        if cc is not None and cc <= 5:
+            grok_n += 1
+            grok_ev.append(f"paleta estrecha ({cc} clusters)")
+        if mbr is not None and mbr > 1.4:
+            grok_n += 1
+            grok_ev.append(f"mid-band ringing (ratio={mbr:.2f})")
+        if bsym is not None and bsym > 0.82:
+            grok_n += 1
+            grok_ev.append(f"simetría bilateral alta (corr={bsym:.3f})")
+        if eqr is not None and eqr < 0.12:
+            grok_n += 1
+            grok_ev.append(f"bordes uniformes (eqr={eqr:.3f})")
+
+        if grok_n >= cfg.grok_min_conditions:
+            is_pro_sharp = (
+                features.get("laplacian_var", 0.0) > 800.0 and
+                (features.get("green_channel_dominance", 1.0) >= 1.15 or
+                 features.get("block_consistency_std", 0.0) > 800.0 or
+                 features.get("chromatic_aberration", 0.0) >= 0.35)
+            )
+            # V10.3: Evitar atenuación si hay convergencia extrema
+            if is_pro_sharp and (lte is not None and lte < 1.5):
+                is_pro_sharp = False
+
+            if is_pro_sharp:
+                grok_score_val = min(15.0, grok_n * 2.0)
+                score  += grok_score_val
+                max_sc += 15.0
+                reasons.append(
+                    f"Atenuación Grok — {grok_n}/11 señales derivadas de edición natural/estudio fotográfico: "
+                    f"{', '.join(grok_ev[:3])}"
                 )
-            elif forensic_score >= 35:
-                prob = max(prob, 45.0)
-                forensic_reasons.append(
-                    f"Evidencia forense moderada -> piso=45 (score={forensic_score:.0f})"
+            else:
+                grok_score_val = min(40.0, grok_n * 6.0)
+                score  += grok_score_val
+                max_sc += 40.0
+                reasons.append(
+                    f"Señales tipo Grok — {grok_n}/11: "
+                    f"{', '.join(grok_ev[:3])}"
                 )
+        else:
+            max_sc += 10.0
 
-            if grok_score > self.config["grok_threshold"]:
-                prob = max(prob, grok_score * 0.9)
-                grok_reasons.append(
-                    f"Firma Aurora prevalece (score={grok_score:.1f})"
+        # ── IMPACTO NEURONAL ────────────────────────────────────────
+        # V10.2: Peso normal para TODOS los casos. La detección Grok
+        # la hace un clasificador independiente (GrokClassifier).
+        nn_weight = 1.2 if (nn_prob > 90 or nn_prob < 10) else 0.8
+        score  += (nn_prob - 50.0) * nn_weight
+        max_sc += 50.0 * nn_weight
+
+        # ── Z: ESCUDOS ÓPTICOS (POST-PROCESO V10.3) ────────────────
+        ai_sig_count_total = count_ai_sigs(reasons)
+        is_mass_convergence = ai_sig_count_total >= 5
+        
+        # B: LAPLACIANO (Protección Bokeh)
+        lap_var = features.get("laplacian_var")
+        block_std = features.get("block_consistency_std")
+        if lap_var is not None:
+            max_sc += cfg.laplacian_weight
+            if lap_var > cfg.laplacian_professional_min and not is_mass_convergence:
+                gd = features.get("green_channel_dominance", 1.0)
+                if gd >= 1.05:
+                    score -= 15.0 # Escudo moderado para fotos reales nítidas
+                    reasons.append("Textura compatible con sensor fotográfico (Protección V10.3)")
+                elif gd < 1.04:
+                    score += 10.0 # Sospecha de nitidez artificial (sin Bayer)
+                    reasons.append("Nitidez artificialmente perfecta (sin sensor Bayer)")
+            elif lap_var < cfg.laplacian_ai_max:
+                if block_std is not None and block_std > 500.0 and not is_mass_convergence:
+                    score -= 25.0
+                    reasons.append("Dinámica focal fotográfica: profundidad de campo óptica (Bokeh)")
+                else:
+                    p = min(cfg.laplacian_weight, (cfg.laplacian_ai_max - lap_var) * 0.5)
+                    score += p
+                    reasons.append(f"Suavizado de bordes artificial (LapVar={lap_var:.0f})")
+
+        # K: ABERRACIÓN CROMÁTICA (Freno forense)
+        if ca_score is not None:
+            if ca_score > 0.35 and not is_mass_convergence:
+                score -= 35.0
+                reasons.append(f"Freno forense: Aberración cromática detectada ({ca_score:.2f})")
+
+        # Bonus final por convergencia masiva
+        if ai_sig_count_total >= 5:
+            score  += 15.0
+
+        # ── CÁLCULO FINAL ───────────────────────────────────────────
+        if max_sc <= 0:
+            max_sc = 1.0
+
+        final_prob = float(np.clip(
+            (score / max_sc) * 100.0 + cfg.prior_bias, 0.0, 100.0
+        ))
+
+        # Cortocircuitos deterministas por metadata
+        if metadata and metadata.get("confirmed_ai") and final_prob < 70.0:
+            final_prob = max(final_prob, 88.0)
+        
+        # V10.3: Los escudos se anulan si la convergencia de señales IA es indiscutible
+        is_mass_convergence = count_ai_sigs(reasons) >= 5 or (fingerprint and fingerprint.get("top_score", 0) > 70.0)
+        
+        if metadata and metadata.get("real_camera") and not is_mass_convergence:
+            if final_prob > 30.0:
+                final_prob = min(final_prob, 20.0)
+
+            # V10.1: ESCUDO EXIF REFORZADO
+            exif_fields = metadata.get("real_camera_field_count", 0)
+            if exif_fields >= 4 and final_prob > 15.0:
+                reasons.append(
+                    f"🛡 Escudo EXIF: {exif_fields} campos de cámara real → techo 15%"
                 )
+                final_prob = min(final_prob, 15.0)
+            elif exif_fields >= 2 and final_prob > 22.0:
+                reasons.append(
+                    f"🛡 Escudo EXIF: {exif_fields} campos de cámara real → techo 22%"
+                )
+                final_prob = min(final_prob, 22.0)
+            elif final_prob > 28.0:
+                reasons.append(
+                    f"🛡 Escudo EXIF: cámara real detectada → techo 28%"
+                )
+                final_prob = min(final_prob, 28.0)
 
-            # Refuerzo cruzado
-            if not neural_uncertain and neural_avg > 60 and forensic_score > 40:
-                prob = min(prob * 1.15, 99)
-                mode += "+refuerzo"
+        # V10.1: Floor Grok ELIMINADO — era demasiado burdo y causaba
+        # falsos positivos. La detección Grok ahora depende del scoring
+        # acumulado normal, sin pisos artificiales.
 
-            final = int(np.clip(prob, 0, 100))
+        # Vveredict logic V10.3
+        # Mejorar proactividad en convergencias masivas (proporcional, no binario)
+        ai_sig_count_eval = count_ai_sigs(reasons)
+        if ai_sig_count_eval >= 7 and final_prob < 60.0:
+            final_prob = min(59.9, final_prob * 1.1) # Solo subimos hasta el borde si no es masiva
+        elif ai_sig_count_eval >= 9 and final_prob < 75.0:
+            final_prob = max(final_prob, 70.0) # Boost para evidencias masivas indiscutibles
 
-            # -- 5. RESPUESTA -------------------------------------------
-            all_reasons = []
-            all_reasons.extend(forensic_reasons)
-            all_reasons.extend(grok_reasons)
+        if final_prob >= 60.0:
+            verdict = "IA"
+            conf    = min(99.0, final_prob + 10.0 if ai_sig_count_eval >= 3 else final_prob)
+        else:
+            verdict = "REAL"
+            conf    = min(99.0, 100.0 - final_prob)
 
-            result = {
-                "status": "success",
-                "probabilidad": final,
-                "nota": " | ".join(all_reasons) if all_reasons else "Organico",
-                "detalles": {
-                    "neural": {
-                        "detector1": round(s1, 1),
-                        "detector2": round(s2, 1),
-                        "detector3": round(s3, 1),
-                        "clip": round(clip, 1),
-                        "promedio": round(neural_avg, 1),
-                        "incierto": neural_uncertain,
+        if not reasons:
+            reasons = ["Análisis fotográfico estándar y consistente."]
+
+        return final_prob, verdict, f"{conf:.1f}%", reasons
+
+
+# ═══════════════════════════════════════════════════════════════
+# MEJORA 5: REGISTRO DE MODELOS CON FALLBACK Y VERSIONING
+# ═══════════════════════════════════════════════════════════════
+MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
+    "sdxl_detector": {
+        "hf_path":       "Organika/sdxl-detector",
+        "version":       "main",
+        "fallback_local": None,   # ruta local si existe caché corrupto
+        "required":      True,    # si falla y required=True → log crítico
+        "weight":        1.0,     # peso relativo en el ensamble neuronal
+    },
+    "ai_human": {
+        "hf_path":       "umm-maybe/AI-image-detector",
+        "version":       "main",
+        "fallback_local": None,
+        "required":      False,
+        "weight":        0.8,
+    },
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+# MEJORA 3: MAPEO DE RAZONES TÉCNICAS → LENGUAJE HUMANO
+# ═══════════════════════════════════════════════════════════════
+_REASON_TRANSLATIONS: List[Tuple[str, str]] = [
+    # (fragmento técnico a buscar,  texto en lenguaje humano)
+    ("sombras sintéticamente",       "Las sombras son demasiado perfectas para una cámara real"),
+    ("sin aberración cromática",     "No hay distorsión óptica natural de lentes (aberración cromática)"),
+    ("textura microscópica",         "La textura a nivel de píxel es artificialmente uniforme"),
+    ("sin dominancia canal verde",   "Ausencia de la huella del sensor Bayer de cámaras reales"),
+    ("carencia anómala",             "Nivel de ruido anormalmente bajo para una foto real"),
+    ("sin exif fotográfico",         "No contiene datos de cámara fotográfica (EXIF)"),
+    ("sensor bayer real",            "Huella de sensor físico de cámara real confirmada"),
+    ("escudo exif",                  "Datos EXIF de cámara real limitan la probabilidad de IA"),
+    ("paleta de color",              "Paleta de color estrecha, típica de generadores IA"),
+    ("simetría bilateral anormal",   "Simetría izquierda-derecha antinatural, característica de IA"),
+    ("ringing espectral",            "Artefactos espectrales del upsampler de IA detectados"),
+    ("patrón de rejilla",            "Patrón de rejilla VAE/DCT propio de Stable Diffusion / Flux"),
+    ("halo en bordes",               "Halos artificiales en bordes, característicos de Midjourney"),
+    ("ruido espacialmente uniforme", "Ruido añadido artificialmente, patrón de DALL-E"),
+    ("superficie sintéticamente",    "Superficie demasiado pulida para ser fotografía real"),
+    ("croma ultra-estrecha",         "Rango de color inusualmente limitado"),
+    ("suavizado de bordes",          "Bordes artificialmente suavizados"),
+    ("reconstrucción espectral",     "Patrón espectral de reconstrucción sintética"),
+    ("inpainting",                   "Posible manipulación o relleno regional con IA (inpainting)"),
+    ("generador:",                   "Generador identificado"),
+    ("firma binaria",                "Firma binaria del generador IA encontrada en el archivo"),
+    ("firma ia",                     "Firma del generador IA encontrada en los metadatos"),
+    ("resolución nativa",            "Resolución exacta de generador IA conocido"),
+    ("dinámica focal",               "Profundidad de campo óptica real (bokeh) detectada"),
+    ("compatible con sensor",        "Textura compatible con sensor fotográfico profesional"),
+    ("dominancia canal verde",       "Dominancia del canal verde confirma sensor Bayer real"),
+    ("señales tipo grok",            "Múltiples señales convergentes de Grok/Aurora"),
+]
+
+
+def _build_evidence_block(
+    prob: float,
+    verdict: str,
+    reasons: List[str],
+    metadata: Dict[str, Any],
+    grok_signals: List[str],
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    """
+    MEJORA 3: Construye el bloque 'evidence' orientado al usuario final.
+    Traduce señales técnicas a lenguaje humano y asigna nivel semántico.
+    """
+    # Nivel de evidencia basado en probabilidad
+    if prob >= 75:
+        level = "high"
+    elif prob >= 45:
+        level = "medium"
+    elif prob >= 20:
+        level = "low"
+    else:
+        level = "minimal"
+
+    # Traducir razones técnicas a lenguaje humano
+    human_reasons: List[str] = []
+    for raw in reasons + grok_signals:
+        raw_lower = raw.lower()
+        translated = None
+        for fragment, human_text in _REASON_TRANSLATIONS:
+            if fragment in raw_lower:
+                translated = human_text
+                break
+        if translated and translated not in human_reasons:
+            human_reasons.append(translated)
+
+    # Si no se tradujeron razones, usar mensaje genérico
+    if not human_reasons:
+        if verdict == "REAL":
+            human_reasons = ["La imagen presenta características consistentes con fotografía real"]
+        elif verdict == "IA":
+            human_reasons = ["La imagen presenta múltiples características de imagen generada por IA"]
+        else:
+            human_reasons = ["Las señales forenses son ambiguas o insuficientes para un veredicto definitivo"]
+
+    # Razón principal: la más relevante
+    main_reason = human_reasons[0] if human_reasons else ""
+
+    # Sugerencia de generador
+    generator_hint = ""
+    gen = metadata.get("generator", "")
+    if gen:
+        generator_hint = f"Generador identificado: {gen}"
+    elif prob >= 70:
+        # Inferir desde fingerprint signals
+        for sig in reasons:
+            if "grok" in sig.lower() or "aurora" in sig.lower():
+                generator_hint = "Posiblemente Grok/Aurora o Flux"
+                break
+            elif "midjourney" in sig.lower() or "mj" in sig.lower():
+                generator_hint = "Posiblemente Midjourney"
+                break
+            elif "stable diffusion" in sig.lower() or "sdxl" in sig.lower():
+                generator_hint = "Posiblemente Stable Diffusion / SDXL"
+                break
+            elif "dall-e" in sig.lower() or "dalle" in sig.lower():
+                generator_hint = "Posiblemente DALL-E"
+                break
+
+    evidence: Dict[str, Any] = {
+        "level":              level,
+        "main_reason":        main_reason,
+        "generator_hint":     generator_hint,
+        "confidence_factors": human_reasons[:5],  # máx 5 para la UI
+        "verdict_label":      {
+            "IA":       "Imagen Generada por IA",
+            "REAL":     "Fotografía Real",
+            "REAL": "Resultado Indeterminado",
+            "ERROR":    "Error de Análisis",
+        }.get(verdict, verdict),
+    }
+
+    if verbose:
+        evidence["technical_details"] = {
+            "raw_reasons": reasons,
+            "grok_signals": grok_signals,
+        }
+
+    return evidence
+
+
+# ═══════════════════════════════════════════════════════════════
+# MEJORA 2: ENSAMBLE PROBABILÍSTICO PONDERADO
+# ═══════════════════════════════════════════════════════════════
+def _weighted_ensemble(
+    meta_prob: float,
+    grok_prob: float,
+    grok_signals: List[str],
+    metadata: Dict[str, Any],
+    features: Dict[str, float],
+) -> Tuple[float, str]:
+    """
+    Combina MetaClassifier y GrokClassifier mediante promedio ponderado
+    con pesos dinámicos basados en contexto.
+
+    Regla clave: cuando Grok tiene alta confianza SIN EXIF, no se le
+    promedia a la baja — se garantiza un PISO mínimo proporcional.
+    """
+    has_real_cam   = bool(metadata.get("real_camera"))
+    has_confirm_ai = bool(metadata.get("confirmed_ai"))
+    has_any_exif   = bool(metadata.get("has_any_exif", False))
+    is_social      = bool(metadata.get("is_social_media"))
+
+    # Contar señales forenses reales (excluir mensajes de gate)
+    forensic_signals = [
+        s for s in grok_signals
+        if not s.startswith(("Clasificador Grok", "🔍", "🔀"))
+    ]
+    n_forensic = len(forensic_signals)
+
+    # ── Caso 1: Cámara real en EXIF → MetaClassifier domina totalmente ──
+    if has_real_cam:
+        exif_fields = metadata.get("real_camera_field_count", 0)
+        meta_w = min(0.97, 0.85 + exif_fields * 0.03)
+        grok_w = 1.0 - meta_w
+        combined = round(meta_prob * meta_w + grok_prob * grok_w, 1)
+        return combined, f"EXIF real ({exif_fields} campos) — Meta domina"
+
+    # ── Caso 2: IA confirmada por metadata → Meta domina ────────────
+    if has_confirm_ai:
+        combined = round(meta_prob * 0.95 + grok_prob * 0.05, 1)
+        return combined, "metadata IA confirmada — Meta domina"
+
+    # ── Caso 3: Sin EXIF — Grok es el detector primario ────────────────
+    # Con muchas señales forenses sin EXIF, Grok es más fiable que Meta.
+    # Garantizamos un PISO: el resultado no puede caer por debajo de
+    # grok_prob * factor_piso, evitando que Meta lo “promedy” a la baja.
+    if not has_any_exif:
+        if n_forensic >= 10:
+            # Alta confianza: Grok decide con Meta
+            meta_w, grok_w = 0.25, 0.75
+            blend_note = f"sin EXIF — convergencia IA masiva ({n_forensic} señales)"
+        elif n_forensic >= 8:
+            meta_w, grok_w = 0.40, 0.60
+            blend_note = f"sin EXIF — alta convergencia Grok ({n_forensic} señales)"
+        elif n_forensic >= 6:
+            meta_w, grok_w = 0.50, 0.50
+            blend_note = f"sin EXIF — Grok moderado ({n_forensic} señales)"
+        else:
+            meta_w, grok_w = 0.70, 0.30
+            blend_note = "sin EXIF — ensamble estándar"
+
+        # ── MEJORA V10.3: Protección específica para sensores reales (Bayer) ──
+        gd = features.get("green_channel_dominance", 1.0)
+        if gd >= 1.05 and n_forensic < 10:
+             meta_w, grok_w = 0.65, 0.35
+             blend_note += " + protección Bayer"
+
+        combined = round(meta_prob * meta_w + grok_prob * grok_w, 1)
+
+        # PISO GARANTIZADO: Grok sin EXIF con alta confianza no puede ser
+        # arrastrado por debajo del umbral de detección por un Meta bajo,
+        # A MENOS que Meta tenga pruebas físicas orgánicas concluyentes (< 45%).
+        if meta_prob >= 45.0:
+            if grok_prob >= 60.0 and n_forensic >= 9:
+                # Alta confianza Grok con múltiples señales (mínimo 9) → prevalece
+                combined = max(combined, grok_prob)
+                blend_note += " [Grok prevalece]"
+            elif grok_prob >= 50.0 and n_forensic >= 7:
+                # Confianza moderada con alta convergencia → piso del 85%
+                floor = round(grok_prob * 0.85, 1)
+                if combined < floor:
+                    combined = floor
+                    blend_note += " [piso Grok aplicado]"
+            elif grok_prob >= 50.0:
+                # Confianza moderada → piso del 90% del score Grok
+                floor = round(grok_prob * 0.90, 1)
+                if combined < floor:
+                    combined = floor
+                    blend_note += " [piso Grok aplicado]"
+
+        # ── MEJORA V10.3: Protección final contra falsos positivos de redes sociales ──
+        if is_social and not has_confirm_ai and combined > 55:
+            # Si no hay pruebas deterministas (metadata o fingerprint extremo),
+            # capamos la probabilidad para evitar el falso veredicto IA.
+            limit = 59.0 # Justo por debajo del umbral IA
+            if combined > limit:
+                # Solo bajamos si MetaProb no es extremadamente alta (>80)
+                if meta_prob < 80.0:
+                    combined = limit
+                    blend_note += " [escudo social media reforzado]"
+
+        return combined, blend_note
+
+    # ── Caso 4: Tiene EXIF pero no es cámara conocida ───────────────
+    # EXIF parcial/desconocido — pesos estándar, ligera ventaja a Meta
+    combined = round(meta_prob * 0.65 + grok_prob * 0.35, 1)
+    return combined, "EXIF parcial — ensamble estándar"
+
+
+# ═══════════════════════════════════════════════════════════════
+# MOTOR NUEROSCAN V10.2
+# ═══════════════════════════════════════════════════════════════
+class NueroscanEngineV9:
+
+    def __init__(self, config: Optional[ThresholdConfig] = None):
+        self.device      = 0 if torch.cuda.is_available() else -1
+        self.torch_dtype = torch.float16 if self.device == 0 else torch.float32
+        self._model_caches: Dict[str, _LRUCache] = {}
+
+        cfg = config or ThresholdConfig()
+        self.extractor         = UniversalFeatureExtractor()
+        self.meta_classifier   = MetaClassifier(cfg)
+        self.metadata_analyzer = MetadataAnalyzer()
+        self.ela_analyzer      = ELAAnalyzer(quality=cfg.ela_quality)
+        self.fingerprinter     = AIGeneratorFingerprinter()
+
+        self._load_models()
+        self._config_hash = f"V10.2-{hashlib.md5(str(cfg).encode()).hexdigest()[:8]}"
+
+    def _load_models(self):
+        """MEJORA 5: Carga desde MODEL_REGISTRY con versioning y fallback."""
+        self._active_detectors: Dict[str, Any] = {}
+        for name, spec in MODEL_REGISTRY.items():
+            loaded = False
+            # Intento 1: cargar desde HuggingFace (usa caché local automáticamente)
+            try:
+                mod = pipeline(
+                    "image-classification",
+                    model=spec["hf_path"],
+                    revision=spec.get("version", "main"),
+                    device=self.device,
+                    torch_dtype=self.torch_dtype,
+                )
+                self._active_detectors[name] = mod
+                self._model_caches[name] = _LRUCache(200)
+                logger.info(f"Modelo '{name}' cargado desde '{spec['hf_path']}' (v={spec.get('version','main')})")
+                loaded = True
+            except Exception as e:
+                logger.warning(f"Modelo '{name}' no cargó desde HF (Red): {e}. Intentando carga local...")
+                # Intento 1b: Forzar modo offline si la red falló (usar lo que haya en cache)
+                try:
+                    mod = pipeline(
+                        "image-classification",
+                        model=spec["hf_path"],
+                        revision=spec.get("version", "main"),
+                        device=self.device,
+                        torch_dtype=self.torch_dtype,
+                        local_files_only=True
+                    )
+                    self._active_detectors[name] = mod
+                    self._model_caches[name] = _LRUCache(200)
+                    logger.info(f"Modelo '{name}' recuperado exitosamente desde caché local.")
+                    loaded = True
+                except Exception as e_off:
+                    logger.warning(f"Carga local de '{name}' también falló: {e_off}")
+
+            # Intento 2: fallback local (si está configurado)
+            if not loaded and spec.get("fallback_local"):
+                try:
+                    mod = pipeline(
+                        "image-classification",
+                        model=spec["fallback_local"],
+                        device=self.device,
+                        torch_dtype=self.torch_dtype,
+                    )
+                    self._active_detectors[name] = mod
+                    self._model_caches[name] = _LRUCache(200)
+                    logger.info(f"Modelo '{name}' cargado desde fallback local: {spec['fallback_local']}")
+                    loaded = True
+                except Exception as e2:
+                    logger.warning(f"Fallback local para '{name}' también falló: {e2}")
+
+            if not loaded:
+                level = "critical" if spec.get("required") else "warning"
+                getattr(logger, level)(f"Modelo '{name}' no disponible (required={spec.get('required', False)})")
+
+    def _score_neural(self, img_hash: str, img_pil: Image.Image) -> float:
+        """MEJORA 5: Pondera scores neurales según el weight del MODEL_REGISTRY."""
+        weighted_scores: List[float] = []
+        weights: List[float] = []
+        for name, model in self._active_detectors.items():
+            cache = self._model_caches[name]
+            score = cache.get(img_hash)
+            if score is None:
+                try:
+                    res    = model(img_pil)
+                    res    = res if isinstance(res, list) else [res]
+                    parsed = {str(r["label"]).lower(): float(r["score"]) for r in res}
+                    score  = 50.0
+                    for k, sc in parsed.items():
+                        if any(x in k for x in ["fake", "ai", "synthetic"]):
+                            score = sc * 100.0; break
+                        if any(x in k for x in ["real", "human", "photo"]):
+                            score = (1.0 - sc) * 100.0; break
+                    cache.set(img_hash, score)
+                except Exception as e:
+                    logger.warning(f"[{name}] Inferencia fallida: {e}")
+                    continue
+            w = MODEL_REGISTRY.get(name, {}).get("weight", 1.0)
+            weighted_scores.append(score * w)
+            weights.append(w)
+        if not weighted_scores:
+            return 50.0
+        return float(sum(weighted_scores) / sum(weights))
+
+    @staticmethod
+    def _validate_input(data: bytes) -> None:
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"Imagen demasiado grande: {len(data) / 1_000_000:.1f} MB "
+                f"(máximo {_MAX_IMAGE_BYTES // 1_000_000} MB)"
+            )
+        try:
+            with Image.open(io.BytesIO(data)) as probe:
+                pw, ph = probe.size
+                if pw * ph > _MAX_IMAGE_PIXELS:
+                    raise ValueError(
+                        f"Imagen demasiado grande: {pw}×{ph} px "
+                        f"(máximo {_MAX_IMAGE_PIXELS // 1_000_000} Mpx)"
+                    )
+        except Exception as e:
+            raise ValueError(f"No se pudo leer la imagen: {e}") from e
+
+    def process_image(self, data: bytes, verbose: bool = False) -> Dict[str, Any]:
+        try:
+            self._validate_input(data)
+
+            # RAW load for metadata preservation
+            img_pil_raw = Image.open(io.BytesIO(data))
+            
+            # Convert to RGB and arrays for analysis
+            img_pil  = img_pil_raw.convert("RGB")
+            img_cv   = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            gray     = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            img_hash = hashlib.md5(data).hexdigest()
+
+            # Early exit: imagen sin textura evaluable
+            if np.std(gray) < 2.0:
+                res = {
+                    "status": "success", "tipo": "imagen",
+                    "probabilidad": 50, "probability": 50, "percentage": 50,
+                    "prob": 50, "score": 50,
+                    "verdict": "REAL", "confidence": "100.0%",
+                    "nota": "Imagen descartada: lienzo sólido o sin textura.",
+                    "reasons": ["La imagen carece de textura evaluable."],
+                    "evidence": {
+                        "level": "minimal",
+                        "main_reason": "La imagen no contiene textura suficiente para analizar",
+                        "generator_hint": "",
+                        "confidence_factors": ["Sin textura evaluable"],
+                        "verdict_label": "Resultado Indeterminado",
                     },
-                    "forense": round(forensic_score, 1),
-                    "grok_signature": round(grok_score, 1),
-                    "modo": mode,
-                    "prob_bruta": round(prob, 1),
+                    "semantico": {
+                        "veredicto": "REAL", "confianza": "100.0%",
+                        "explicacion": "Análisis abortado por falta de entropía visual.",
+                        "score_ajuste": 0.0,
+                    },
+                    "detalles": {},
+                }
+                return {**res, "data": res, "result": res, "response": res}
+
+            # Análisis paralelo
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                f_neural   = pool.submit(self._score_neural, img_hash, img_pil)
+                f_metadata = pool.submit(self.metadata_analyzer.analyze, data, img_pil_raw)
+                f_ela      = pool.submit(self.ela_analyzer.analyze, data, img_pil)
+                nn_prob  = f_neural.result()
+                metadata = f_metadata.result()
+                ela      = f_ela.result()
+
+            features    = self.extractor.extract(gray, img_cv)
+            fingerprint = self.fingerprinter.analyze(gray, img_cv, features)
+
+            prob, verdict, conf_str, reasons = self.meta_classifier.evaluate(
+                features, nn_prob, metadata, ela, fingerprint
+            )
+            meta_prob_raw = prob   # guardar antes de que el ensamble lo sobreescriba
+
+            # ── MEJORA 2: Clasificador Grok + Ensamble Ponderado ──────────
+            grok_prob, grok_signals = GrokClassifier.classify(
+                features, metadata, img_pil.size
+            )
+
+            # Combinar Meta y Grok con promedio ponderado dinámico
+            prob, blend_note = _weighted_ensemble(
+                meta_prob=prob,
+                grok_prob=grok_prob,
+                grok_signals=grok_signals,
+                metadata=metadata,
+                features=features,
+            )
+            reasons.append(
+                f"🔀 Ensamble [{blend_note}]: Meta={int(meta_prob_raw)}% · Grok={int(grok_prob)}% → {int(prob)}%"
+            )
+            reasons.extend(grok_signals)
+
+            # Recalcular veredicto con probabilidad del ensamble (Estándar Pulzo)
+            cfg = self.meta_classifier.cfg
+            if prob >= cfg.verdict_ai_threshold:
+                verdict  = "IA"
+                conf_str = f"{min(99.0, prob):.1f}%"
+            else:
+                verdict  = "REAL"
+                conf_str = f"{min(99.0, 100.0 - prob):.1f}%"
+
+            # ── MEJORA 3: Bloque de evidencia orientado al usuario ─────────
+            evidence = _build_evidence_block(
+                prob=prob,
+                verdict=verdict,
+                reasons=reasons,
+                metadata=metadata,
+                grok_signals=grok_signals,
+                verbose=verbose,
+            )
+
+            ela_public = {k: v for k, v in ela.items() if k != "heatmap_b64"}
+            if verbose:
+                ela_public["heatmap_b64"] = ela.get("heatmap_b64")
+
+            # ── MEJORA 4: Log de predicción para calibración futura ────────
+            logger.info(
+                f"PRED|hash={img_hash[:8]}|prob={prob:.1f}|verdict={verdict}|"
+                f"neural={nn_prob:.1f}|meta={meta_prob_raw:.1f}|grok={grok_prob:.1f}|"
+                f"real_cam={metadata.get('confirmed_ai', False)}|"
+                f"meta_confirmed={metadata.get('real_camera', False)}"
+            )
+
+            res: Dict[str, Any] = {
+                "status":       "success",
+                "tipo":         "imagen",
+                "probabilidad": int(prob),
+                "probability":  int(prob),
+                "percentage":   int(prob),
+                "prob":         int(prob),
+                "score":        int(prob),
+                "verdict":      verdict,
+                "confidence":   conf_str,
+                "nota":         " | ".join(reasons),
+                "reasons":      reasons,
+                # ── MEJORA 3: Bloque para el usuario final ────────────────
+                "evidence":     evidence,
+                "semantico": {
+                    "veredicto":    verdict,
+                    "confianza":    conf_str,
+                    "explicacion":  "Análisis Biométrico + ELA + Metadata + CA + Entropy + Symmetry + Palette V10.2",
+                    "score_ajuste": round(prob - meta_prob_raw, 1),
+                },
+                "detalles": {
+                    "neural":       round(nn_prob, 1),
+                    "meta_prob":    round(meta_prob_raw, 1),
+                    "grok_prob":    round(grok_prob, 1),
+                    "blend_note":   blend_note,
+                    "features":     {k: (round(v, 2) if v is not None else None) for k, v in features.items()},
+                    "ela":          ela_public,
+                    "metadata": {
+                        "confirmed_ai":   metadata["confirmed_ai"],
+                        "generator":      metadata["generator"],
+                        "real_camera":    metadata["real_camera"],
+                        "c2pa_present":   metadata["c2pa_present"],
+                        "c2pa_ai_signed": metadata["c2pa_ai_signed"],
+                        "signals":        metadata["signals"],
+                        **({"raw_fields": metadata["raw_fields"]} if verbose else {}),
+                    },
+                    "fingerprint": {
+                        "family_scores": fingerprint["family_scores"],
+                        "top_family":    fingerprint["top_family"],
+                        "signals":       fingerprint["signals"],
+                        "fft_grid":      fingerprint["fft_grid_detected"],
+                        "edge_halo":     fingerprint["edge_halo_detected"],
+                        "noise_inject":  fingerprint["noise_injection_detected"],
+                    },
+                    "predicciones": {
+                        "IA":     f"{int(prob)}%",
+                        "Humano": f"{100 - int(prob)}%",
+                    },
                 },
             }
-
-            if verbose:
-                result["detalles"]["forense_raw"] = {
-                    k: round(v, 4) if isinstance(v, float) else v
-                    for k, v in f_data.items()
-                }
-
-            return result
+            return {**res, "data": res, "result": res, "response": res}
 
         except Exception as e:
-            logger.error(f"Error en process_image: {e}")
-            return {"status": "error", "error": str(e)}
-
-    # ---------------------------------------------------------
-
-    # BATCH PROCESSING
-    # ─────────────────────────────────────────────
+            logger.error(f"process_image falló: {e}", exc_info=True)
+            return self._error_result(str(e))
 
     def process_batch(
         self,
-        data_list,
+        data_list: List[bytes],
         max_workers: int = 4,
         progress_callback=None,
-    ):
-        """
-        Analiza múltiples imágenes en paralelo.
-
-        Args:
-            data_list  : list[bytes | dict]  – bytes crudos O dicts con clave
-                         ``data`` (bytes) y opcionalmente ``id`` (str).
-            max_workers: int – hilos paralelos (default 4).
-            progress_callback: callable(done: int, total: int, result: dict) | None
-
-        Returns:
-            dict con:
-                ``results``  – lista de resultados en el mismo orden que data_list
-                ``summary``  – estadísticas agregadas del batch
-                ``elapsed_s``– segundos totales del batch
-        """
-        total = len(data_list)
-        if total == 0:
-            return {
-                "results": [],
-                "summary": self._batch_summary([]),
-                "elapsed_s": 0.0,
-            }
-
-        # Normalizar entradas → siempre trabajamos con (idx, id, bytes)
-        tasks = []
-        for idx, item in enumerate(data_list):
-            if isinstance(item, (bytes, bytearray)):
-                tasks.append((idx, str(idx), bytes(item)))
-            elif isinstance(item, dict):
-                img_id = str(item.get("id", idx))
-                img_bytes = item.get("data", b"")
-                tasks.append((idx, img_id, img_bytes))
-            else:
-                tasks.append((idx, str(idx), b""))
-
-        results_ordered = [None] * total
-        done_count = 0
-        t_start = time.perf_counter()
-
-        def _worker(task):
-            idx, img_id, img_bytes = task
-            if not img_bytes:
-                return idx, {
-                    "id": img_id,
-                    "status": "error",
-                    "error": "Sin datos de imagen",
-                }
-            try:
-                res = self.process_image(img_bytes)
-                res["id"] = img_id
-                return idx, res
-            except Exception as exc:
-                return idx, {"id": img_id, "status": "error", "error": str(exc)}
-
+    ) -> List[Dict[str, Any]]:
+        results: List[Optional[Dict[str, Any]]] = [None] * len(data_list)
+        completed = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_worker, task): task[0] for task in tasks}
-            for future in concurrent.futures.as_completed(futures):
-                idx, res = future.result()
-                results_ordered[idx] = res
-                done_count += 1
-                if progress_callback is not None:
-                    try:
-                        progress_callback(done_count, total, res)
-                    except Exception:
-                        pass
-
-        elapsed = time.perf_counter() - t_start
-        return {
-            "results": results_ordered,
-            "summary": self._batch_summary(results_ordered),
-            "elapsed_s": round(elapsed, 3),
-        }
+            future_to_idx = {executor.submit(self.process_image, d): i for i, d in enumerate(data_list)}
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    logger.error(f"Batch item {idx} falló: {e}", exc_info=True)
+                    results[idx] = self._error_result(str(e))
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, len(data_list))
+        return results  # type: ignore[return-value]
 
     @staticmethod
-    def _batch_summary(results):
-        """Genera estadísticas agregadas de un batch de resultados."""
-        total = len(results)
-        if total == 0:
-            return {"total": 0}
-
-        ok = [r for r in results if r and r.get("status") == "success"]
-        errors = total - len(ok)
-        probs = [r["probabilidad"] for r in ok if "probabilidad" in r]
-
-        if not probs:
-            return {
-                "total": total,
-                "ok": 0,
-                "errors": errors,
-            }
-
-        ai_count    = sum(1 for p in probs if p >= 70)
-        real_count  = sum(1 for p in probs if p <  40)
-        doubt_count = total - ai_count - real_count - errors
-
-        return {
-            "total"        : total,
-            "ok"           : len(ok),
-            "errors"       : errors,
-            "ai_detected"  : ai_count,
-            "real_detected": real_count,
-            "doubtful"     : doubt_count,
-            "prob_mean"    : round(sum(probs) / len(probs), 1),
-            "prob_max"     : max(probs),
-            "prob_min"     : min(probs),
+    def _error_result(msg: str) -> Dict[str, Any]:
+        err: Dict[str, Any] = {
+            "status": "error", "tipo": "imagen",
+            "probabilidad": 0, "probability": 0, "percentage": 0,
+            "prob": 0, "score": 0,
+            "verdict": "ERROR", "error": msg, "nota": msg,
+            "reasons": [msg], "confidence": "0%",
+            "semantico": {"veredicto": "ERROR", "confianza": "0%", "explicacion": msg, "score_ajuste": 0},
+            "detalles": {},
         }
+        return {**err, "data": err, "result": err, "response": err}
 
 
-# ─────────────────────────────────────────────
-# SINGLETON
-# ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# SINGLETON CON DOUBLE-CHECKED LOCKING
+# ═══════════════════════════════════════════════════════════════
+_engine: Optional[NueroscanEngineV9] = None
+_engine_lock = Lock()
 
-_engine = None
 
-
-def get_engine(config=None):
+def get_engine(config: Optional[ThresholdConfig] = None) -> NueroscanEngineV9:
     global _engine
     if _engine is None:
-        _engine = NueroscanEngineV5(config)
+        with _engine_lock:
+            if _engine is None:
+                _engine = NueroscanEngineV9(config)
     return _engine
 
 
-def analyze_image(data, config=None):
-    engine = get_engine(config)
-    return engine.process_image(data)
-
-
-def reset_engine():
-    global _engine
-    if _engine:
-        _engine._models_cache.clear()
-        _engine = None
-
-
-def analyze_batch(
-    data_list,
-    config=None,
-    max_workers: int = 4,
-    progress_callback=None,
-):
-    """
-    Analiza un lote de imágenes usando el engine singleton.
-
-    Args:
-        data_list       : list[bytes | dict]  – ver ``process_batch`` para formato.
-        config          : dict | None  – configuración del engine (sólo se aplica
-                          si el engine aún no ha sido inicializado).
-        max_workers     : int – hilos paralelos.
-        progress_callback: callable(done, total, result) | None
-
-    Returns:
-        dict  – ``results``, ``summary`` y ``elapsed_s``.
-
-    Ejemplo de uso básico::
-
-        with open("img1.jpg", "rb") as f1, open("img2.jpg", "rb") as f2:
-            batch = [
-                {"id": "foto_1", "data": f1.read()},
-                {"id": "foto_2", "data": f2.read()},
-            ]
-        resultado = analyze_batch(batch, max_workers=2)
-        print(resultado["summary"])
-
-    Ejemplo con callback de progreso::
-
-        def on_progress(done, total, res):
-            pct = int(done / total * 100)
-            print(f"[{pct}%] {done}/{total} – id={res.get('id')} prob={res.get('probabilidad')}")
-
-        resultado = analyze_batch(batch, progress_callback=on_progress)
-    """
-    engine = get_engine(config)
-    return engine.process_batch(
-        data_list,
-        max_workers=max_workers,
-        progress_callback=progress_callback,
-    )
+def analyze_image(image_bytes: bytes, verbose: bool = False) -> Dict[str, Any]:
+    """Helper wrapper compatible con el router V4.1."""
+    return get_engine().process_image(image_bytes, verbose=verbose)

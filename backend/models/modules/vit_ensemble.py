@@ -12,6 +12,17 @@ Clasificación con ensemble de modelos de visión:
 import cv2
 import numpy as np
 import torch
+import logging
+import os
+os.environ["HF_HUB_READ_TIMEOUT"] = "60"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
+
+# Silenciar logs ruidosos de bibliotecas externas
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+
+import transformers
+transformers.utils.logging.set_verbosity_warning()
 from typing import List, Dict, Optional, Tuple
 from PIL import Image
 from transformers import (
@@ -56,13 +67,23 @@ class ViTEnsembleClassifier:
         try:
             model_id = "prithivMLmods/Deep-Fake-Detector-v2-Model"
             print(f">>> [ViTEnsemble] Cargando {model_id}...")
-            self._vit_proc  = AutoImageProcessor.from_pretrained(model_id)
-            self._vit_model = (
-                AutoModelForImageClassification
-                .from_pretrained(model_id)
-                .to(self.device)
-                .eval()
-            )
+            try:
+                self._vit_proc  = AutoImageProcessor.from_pretrained(model_id)
+                self._vit_model = (
+                    AutoModelForImageClassification
+                    .from_pretrained(model_id)
+                    .to(self.device)
+                    .eval()
+                )
+            except Exception as e_hf:
+                print(f">>> [ViTEnsemble] ViT no cargo de HF: {e_hf}. Reintentando local...")
+                self._vit_proc  = AutoImageProcessor.from_pretrained(model_id, local_files_only=True)
+                self._vit_model = (
+                    AutoModelForImageClassification
+                    .from_pretrained(model_id, local_files_only=True)
+                    .to(self.device)
+                    .eval()
+                )
             # Detectar índice de clase "fake" dinámicamente desde los labels del modelo
             labels = self._vit_model.config.id2label
             self._fake_idx = next(
@@ -79,15 +100,25 @@ class ViTEnsembleClassifier:
         try:
             vmae_id = "MCG-NJU/videomae-base"
             print(f">>> [ViTEnsemble] Cargando {vmae_id}...")
-            self._vmae_proc  = AutoImageProcessor.from_pretrained(vmae_id)
-            # VideoMAEModel (base) en lugar de VideoMAEForVideoClassification:
-            # extrae representaciones latentes espaciotemporales
-            self._vmae_model = (
-                VideoMAEModel
-                .from_pretrained(vmae_id)
-                .to(self.device)
-                .eval()
-            )
+            try:
+                self._vmae_proc  = AutoImageProcessor.from_pretrained(vmae_id)
+                # VideoMAEModel (base) en lugar de VideoMAEForVideoClassification:
+                # extrae representaciones latentes espaciotemporales
+                self._vmae_model = (
+                    VideoMAEModel
+                    .from_pretrained(vmae_id)
+                    .to(self.device)
+                    .eval()
+                )
+            except Exception as e_vmae:
+                print(f">>> [ViTEnsemble] VideoMAE no cargo de HF: {e_vmae}. Reintentando local...")
+                self._vmae_proc  = AutoImageProcessor.from_pretrained(vmae_id, local_files_only=True)
+                self._vmae_model = (
+                    VideoMAEModel
+                    .from_pretrained(vmae_id, local_files_only=True)
+                    .to(self.device)
+                    .eval()
+                )
             print(">>> [ViTEnsemble] VideoMAE base cargado (modo latentes)")
         except Exception as e:
             print(f">>> [ViTEnsemble] VideoMAE no disponible: {e}")
@@ -232,6 +263,7 @@ class ViTEnsembleClassifier:
             return {"mean": 0.5, "p90": 0.5, "std": 0.0, "aggregate": 0.5}
 
         arr      = np.array(scores)
+        n        = len(scores)
         mean     = float(np.mean(arr))
         median   = float(np.median(arr))
         p75      = float(np.percentile(arr, 75))
@@ -240,16 +272,21 @@ class ViTEnsembleClassifier:
         above_75 = float(np.mean(arr > 0.75))
         above_50 = float(np.mean(arr > 0.5))
 
-        # Estrategia muy conservadora (anti-falsos positivos)
-        if above_75 > 0.80:
-            # Consenso total en alta sospecha
-            aggregate = p90 * 0.50 + mean * 0.30 + above_75 * 0.20
-        elif above_50 > 0.60:
-            # Sospecha moderada con consenso de mayoría
-            aggregate = median * 0.40 + p75 * 0.40 + mean * 0.20
+        # Caso especial para imágenes individuales (no video)
+        # Si es un solo frame, no promediamos con nada más.
+        if n == 1:
+            aggregate = scores[0]
         else:
-            # Video probablemente real o ruido base
-            aggregate = median * 0.80 + mean * 0.20
+            # Estrategia muy conservadora para video (anti-falsos positivos)
+            if above_75 > 0.80:
+                # Consenso total en alta sospecha
+                aggregate = p90 * 0.50 + mean * 0.30 + above_75 * 0.20
+            elif above_50 > 0.60:
+                # Sospecha moderada con consenso de mayoría
+                aggregate = median * 0.40 + p75 * 0.40 + mean * 0.20
+            else:
+                # Video probablemente real o ruido base
+                aggregate = median * 0.80 + mean * 0.20
 
         return {
             "mean":         round(mean, 3),
@@ -257,8 +294,8 @@ class ViTEnsembleClassifier:
             "p75":          round(p75, 3),
             "p90":          round(p90, 3),
             "std":          round(std, 3),
-            "above_50_pct": round(above_50, 3),
-            "n_frames":     len(scores),
+            "above_50_pct": round(above_50, 3) if n > 1 else (1.0 if scores[0] > 0.5 else 0.0),
+            "n_frames":     n,
             "aggregate":    round(min(1.0, float(aggregate)), 3),
         }
 

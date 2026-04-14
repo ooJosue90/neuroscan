@@ -4,753 +4,632 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DECTECTAME ESTA | AI FORENSIC STATION</title>
+    <title>TALOS | FORENSIC AI STATION</title>
+    <link rel="icon" href="favicon.png" type="image/png">
+    <!-- CSS Externo -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;700&family=JetBrains+Mono&display=swap"
         rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Librerías Externas -->
     <script src="https://unpkg.com/wavesurfer.js@7"></script>
-    <style>
-        :root {
-            --accent: #ff0055;
-            --accent-hover: #ff3377;
-            --bg-primary: #0a0a0f;
-            --bg-secondary: rgba(15, 15, 20, 0.7);
-            --bg-tertiary: rgba(255, 255, 255, 0.03);
-            --text-primary: #ffffff;
-            --text-secondary: #a0a0b0;
-            --text-muted: #505060;
-            --border: rgba(255, 0, 85, 0.3);
-            --success: #00ffcc;
-            --danger: #ff0055;
-            --radius: 4px;
-        }
-
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: 'Space Grotesk', 'JetBrains Mono', sans-serif;
-            background-color: var(--bg-primary);
-            background-image:
-                linear-gradient(rgba(255, 0, 85, 0.05) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255, 0, 85, 0.05) 1px, transparent 1px);
-            background-size: 30px 30px;
-            color: var(--text-primary);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 24px 16px;
-            margin: 0;
-            line-height: 1.5;
-            overflow-x: hidden;
-        }
-
-        body::after {
-            content: " ";
-            display: block;
-            position: fixed;
-            top: 0;
-            left: 0;
-            bottom: 0;
-            right: 0;
-            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
-            z-index: 9999;
-            background-size: 100% 2px, 3px 100%;
-            pointer-events: none;
-            opacity: 0.15;
-        }
-
-        .container {
-            width: 100%;
-            max-width: 600px;
-            margin: 0 auto;
-            position: relative;
-            z-index: 10;
-        }
-
-        .cool-title {
-            font-weight: 700;
-            letter-spacing: 4px;
-            color: var(--text-primary);
-            font-size: clamp(2rem, 6vw, 3rem);
-            text-align: center;
-            margin: 0 0 8px 0;
-            text-transform: uppercase;
-            text-shadow: 0 0 10px rgba(255, 0, 85, 0.5);
-            animation: glitch 3s infinite;
-        }
-
-        @keyframes glitch {
-            0% {
-                transform: translate(0)
-            }
-
-            2% {
-                transform: translate(-2px, 1px)
-            }
-
-            4% {
-                transform: translate(-1px, -1px)
-            }
-
-            6% {
-                transform: translate(2px, 1px)
-            }
-
-            8% {
-                transform: translate(0)
-            }
-
-            100% {
-                transform: translate(0)
-            }
-        }
-
-        .text-info {
-            color: var(--success) !important;
-            text-shadow: 0 0 8px rgba(0, 255, 204, 0.4);
-        }
-
-        .main-container {
-            background: var(--bg-secondary);
-            backdrop-filter: blur(10px);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 40px;
-            box-shadow: 0 0 30px rgba(255, 0, 85, 0.1);
-            width: 100%;
-            position: relative;
-            overflow: hidden;
-            transition: border-color 0.5s ease;
-        }
-
-        .main-container::before,
-        .main-container::after {
-            content: '';
-            position: absolute;
-            width: 20px;
-            height: 20px;
-            border: 2px solid var(--accent);
-            transition: all 0.3s ease;
-        }
-
-        .main-container::before {
-            top: 0;
-            left: 0;
-            border-right: none;
-            border-bottom: none;
-        }
-
-        .main-container::after {
-            bottom: 0;
-            right: 0;
-            border-left: none;
-            border-top: none;
-        }
-
-        .main-container:hover::before,
-        .main-container:hover::after {
-            width: 30px;
-            height: 30px;
-        }
-
-        .upload-area {
-            border: 1px dashed var(--text-muted);
-            border-radius: var(--radius);
-            padding: 50px 24px;
-            transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-            cursor: pointer;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            background: rgba(0, 0, 0, 0.3);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .upload-area:hover {
-            border-color: var(--accent);
-            background: rgba(255, 0, 85, 0.05);
-            box-shadow: inset 0 0 20px rgba(255, 0, 85, 0.1);
-        }
-
-        .upload-area.drag-over {
-            border-color: var(--success);
-            background: rgba(0, 255, 204, 0.05);
-            transform: scale(1.02);
-        }
-
-        .upload-area svg {
-            width: 48px;
-            height: 48px;
-            stroke: var(--text-secondary);
-            margin-bottom: 20px;
-            transition: all 0.3s ease;
-        }
-
-        .upload-area:hover svg {
-            stroke: var(--accent);
-            transform: translateY(-5px);
-        }
-
-        .upload-area h4 {
-            font-family: 'JetBrains Mono', monospace;
-            font-weight: 700;
-            margin: 0 0 10px 0;
-            font-size: 1.1rem;
-            color: var(--text-primary);
-            letter-spacing: 2px;
-        }
-
-        .upload-area p {
-            color: var(--text-secondary);
-            font-size: 0.85rem;
-            margin: 0;
-            font-family: 'JetBrains Mono', monospace;
-        }
-
-        .terminal-box {
-            background: rgba(0, 0, 0, 0.6);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-left: 3px solid var(--accent);
-            border-radius: 0;
-            padding: 16px;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.8rem;
-            color: var(--success);
-            height: 80px;
-            overflow-y: auto;
-            margin: 30px 0;
-            line-height: 1.6;
-            box-shadow: inset 0 0 10px rgba(0, 255, 204, 0.05);
-        }
-
-        .btn-scan {
-            background: transparent;
-            border: 1px solid var(--accent);
-            color: var(--accent);
-            font-family: 'JetBrains Mono', monospace;
-            font-weight: 700;
-            padding: 16px 24px;
-            border-radius: 0;
-            font-size: 1rem;
-            transition: all 0.3s ease;
-            width: 100%;
-            cursor: pointer;
-            letter-spacing: 3px;
-            text-transform: uppercase;
-            position: relative;
-            overflow: hidden;
-            z-index: 1;
-        }
-
-        .btn-scan::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: var(--accent);
-            transform: scaleX(0);
-            transform-origin: left;
-            transition: transform 0.3s ease;
-            z-index: -1;
-        }
-
-        .btn-scan:hover:not(:disabled) {
-            color: #fff;
-            box-shadow: 0 0 20px rgba(255, 0, 85, 0.4);
-        }
-
-        .btn-scan:hover:not(:disabled)::before {
-            transform: scaleX(1);
-        }
-
-        .btn-scan:disabled {
-            opacity: 0.3;
-            pointer-events: none;
-            border-color: var(--text-muted);
-            color: var(--text-muted);
-        }
-
-        #verdict-text {
-            font-size: clamp(1.8rem, 6vw, 2.5rem);
-            font-weight: 700;
-            margin: 32px 0 24px;
-            text-align: center;
-            font-family: 'Space Grotesk', sans-serif;
-            letter-spacing: 2px;
-            animation: pulse 2s infinite;
-        }
-
-        @keyframes pulse {
-            0% {
-                opacity: 0.8;
-            }
-
-            50% {
-                opacity: 1;
-                text-shadow: 0 0 20px currentColor;
-            }
-
-            100% {
-                opacity: 0.8;
-            }
-        }
-
-        .gauge-wrapper {
-            position: relative;
-            width: 100%;
-            max-width: 280px;
-            aspect-ratio: 2 / 1;
-            margin: 0 auto 30px;
-        }
-
-        .gauge-svg {
-            width: 100%;
-            height: auto;
-            display: block;
-            filter: drop-shadow(0 0 10px rgba(0, 255, 204, 0.3));
-        }
-
-        .needle-container {
-            position: absolute;
-            bottom: 0;
-            left: 50%;
-            width: 45%;
-            height: 2px;
-            transform-origin: left center;
-            transform: rotate(-90deg);
-            transition: transform 1.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            z-index: 10;
-        }
-
-        .needle {
-            width: 100%;
-            height: 100%;
-            background: #fff;
-            box-shadow: 0 0 8px #fff;
-        }
-
-        .gauge-bolt {
-            width: 16px;
-            height: 16px;
-            background: var(--bg-primary);
-            border: 2px solid #fff;
-            border-radius: 50%;
-            position: absolute;
-            bottom: -8px;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 20;
-            box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
-        }
-
-        #pct-text {
-            font-size: clamp(3rem, 10vw, 5rem);
-            font-weight: 700;
-            text-align: center;
-            margin: 0 0 32px;
-            font-family: 'JetBrains Mono', monospace;
-            letter-spacing: -2px;
-            color: #fff;
-            text-shadow: 0 0 20px rgba(255, 255, 255, 0.2);
-        }
-
-        #tech-details {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            flex-wrap: wrap;
-            margin: 0 0 30px;
-        }
-
-        .tech-item {
-            background: rgba(0, 0, 0, 0.5);
-            border: 1px solid var(--text-muted);
-            padding: 12px 20px;
-            text-align: center;
-            min-width: 140px;
-        }
-
-        .tech-label {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.65rem;
-            color: var(--text-secondary);
-            margin-bottom: 6px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        .tech-value {
-            font-size: 1.1rem;
-            font-weight: 700;
-            color: var(--success);
-            font-family: 'JetBrains Mono', monospace;
-        }
-
-        #verdict-note {
-            font-size: 0.9rem;
-            color: var(--text-secondary);
-            text-align: center;
-            margin: 0 0 32px;
-            font-family: 'JetBrains Mono', monospace;
-        }
-
-        .btn-outline-light {
-            font-family: 'JetBrains Mono', monospace;
-            letter-spacing: 1px;
-            border-radius: 0 !important;
-            transition: all 0.3s ease;
-            border-color: rgba(255, 255, 255, 0.5);
-        }
-
-        .btn-outline-light:hover {
-            background: rgba(255, 255, 255, 0.1);
-            color: #fff;
-            box-shadow: 0 0 15px rgba(255, 255, 255, 0.2);
-        }
-
-        #imgPreview,
-        #videoPreview {
-            width: 100%;
-            height: auto;
-            max-height: 300px;
-            object-fit: cover;
-            border: 1px solid var(--border);
-            margin: 20px 0;
-            display: block;
-            background: #000;
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
-            animation: fadeIn 0.5s ease;
-        }
-
-        @keyframes fadeIn {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        #audioWrapper {
-            display: none;
-            width: 100%;
-            padding: 20px;
-            margin-top: 20px;
-            background: rgba(0, 0, 0, 0.4);
-            border: 1px solid rgba(0, 255, 204, 0.2);
-        }
-
-        #waveform {
-            width: 100%;
-            height: 60px;
-        }
-
-        .play-btn {
-            background: none;
-            border: none;
-            color: var(--success);
-            font-size: 0.85rem;
-            font-weight: 700;
-            cursor: pointer;
-            margin-top: 15px;
-            padding: 8px 0;
-            font-family: 'JetBrains Mono', monospace;
-            letter-spacing: 1px;
-            transition: all 0.2s;
-        }
-
-        .play-btn:hover {
-            text-shadow: 0 0 8px var(--success);
-            transform: translateX(5px);
-        }
-
-        .scan-line {
-            position: absolute;
-            width: 100%;
-            height: 2px;
-            background: var(--accent);
-            box-shadow: 0 0 10px var(--accent), 0 0 20px var(--accent);
-            top: 0;
-            left: 0;
-            display: none;
-            animation: scanLineAnim 2s linear infinite;
-            z-index: 5;
-        }
-
-        @keyframes scanLineAnim {
-            0% {
-                top: 0;
-                opacity: 0;
-            }
-
-            10% {
-                opacity: 1;
-            }
-
-            90% {
-                opacity: 1;
-            }
-
-            100% {
-                top: 100%;
-                opacity: 0;
-            }
-        }
-
-        ::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: var(--bg-primary);
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: var(--text-muted);
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--accent);
-        }
-
-        @media (max-width: 480px) {
-            .main-container {
-                padding: 24px;
-                border-width: 1px 0;
-                border-radius: 0;
-            }
-
-            .upload-area {
-                padding: 30px 16px;
-            }
-
-            #pct-text {
-                font-size: 2.5rem;
-            }
-        }
-    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 </head>
 
 <body>
+    <!-- Fondo Animado de Figuras Geométricas -->
+    <canvas id="bgCanvas"></canvas>
+    <div class="grid-pulse"></div>
+    <div id="hud-bits-container"></div>
 
-    <div class="container text-center">
-        <header class="mb-4">
-            <h1 class="cool-title mb-0">DETECTAME ESTA</h1>
-            <p class="text-info small" style="letter-spacing: 8px;">FORENSIC AI ANALYZER</p>
-        </header>
+    <!-- Botones de Control Superpuestos -->
+    <button class="btn-menu" id="sidebarToggle" title="Menú Lateral">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+    </button>
+    <button class="btn-help" id="btnHelp">?</button>
 
-        <div class="main-container col-lg-8 mx-auto shadow-lg" id="mainPanel">
-            <div id="ui-upload">
-                <div class="upload-area mb-4" id="dropZone">
-                    <div class="scan-line" id="scanner"></div>
-                    <div id="uploadContent">
-                        <div class="mb-3">
-                            <svg width="50" height="50" viewBox="0 0 24 24" fill="none" stroke="var(--primary)"
+    <!-- Menú Lateral (Sidebar) -->
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div>
+                <h4>TALOS</h4>
+                <p class="small text-muted mb-0">V10.3 FORENSIC</p>
+            </div>
+        </div>
+        <ul class="nav-menu">
+            <li id="nav-scanner" class="active">
+                <a href="#" onclick="switchTab('scanner')">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+                        <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+                        <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+                        <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+                        <line x1="7" y1="12" x2="17" y2="12" />
+                        <polyline points="12 7 12 17" />
+                    </svg>
+                    ESCÁNER
+                </a>
+            </li>
+            <li id="nav-database">
+                <a href="#" onclick="switchTab('database')">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 8v4l3 3" />
+                        <circle cx="12" cy="12" r="9" />
+                        <path d="M3.3 7a9 9 0 0 1 1.2-1.7" />
+                        <path d="M19.5 5.3A9 9 0 0 1 21 12" />
+                    </svg>
+                    HISTORIAL
+                </a>
+            </li>
+            <li id="nav-contact">
+                <a href="#" onclick="switchTab('contact')">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="2" y="4" width="20" height="16" rx="2" />
+                        <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
+                        <path d="M12 18h.01" />
+                    </svg>
+                    CONTACTO
+                </a>
+            </li>
+            <li id="nav-academy">
+                <a href="#" onclick="switchTab('academy')">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 10v6M2 10l10-5 10 5-10 5z" />
+                        <path d="M6 12v5c3 3 9 3 12 0v-5" />
+                    </svg>
+                    ACADEMY
+                </a>
+            </li>
+            <li id="nav-challenge">
+                <a href="#" onclick="switchTab('challenge')">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                        <circle cx="12" cy="11" r="3" />
+                    </svg>
+                    EXAMEN IA
+                </a>
+            </li>
+        </ul>
+        <div class="sidebar-footer">
+            <div class="sys-status">
+                <span class="status-dot"></span>
+                <span class="status-blink">CLÚSTER ACTIVO</span>
+            </div>
+        </div>
+    </aside>
+
+    <div class="bg-glow-1"></div>
+    <div class="bg-glow-2"></div>
+
+    <!-- Decals Decorativos (Cyberpunk Aesthetics) -->
+    <div class="decal decal-tl">TS-TYPE: NEURAL_SCANNER // ID: 0xFF92</div>
+    <div class="decal decal-tr">SECURE_NODE: ACTIVE // PORT_6001</div>
+    <div class="decal decal-bl">V10.3 // TRACE_MODE // LATENCY: 12ms</div>
+    <div class="decal decal-br">© 2026 TALOS LABS<br>AUTORIZADO PARA USO FORENSE DIGITAL</div>
+
+    <div class="container py-5">
+        <!-- Panel de Escaneo -->
+        <main id="scanPanel">
+            <header class="text-center mb-3">
+                <h1 class="cool-title mb-0">TALOS </h1>
+                <p class="text-info small forensic-subtitle">FORENSIC AI ANALYZER</p>
+            </header>
+
+            <div class="main-container col-lg-6 mx-auto shadow-lg" id="mainPanel">
+                <div class="tech-tag mb-3" style="position: absolute; top: 10px; right: 20px;">TS-NODE: 0xFF92 // ACTIVE
+                </div>
+                <div id="ui-upload">
+                    <div class="upload-area mb-4" id="dropZone" tabindex="0">
+                        <div class="scan-line" id="scanner"></div>
+                        <div id="uploadContent" class="d-flex flex-column align-items-center justify-content-center">
+                            <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                 stroke-width="1.5">
                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                                 <polyline points="17 8 12 3 7 8"></polyline>
                                 <line x1="12" y1="3" x2="12" y2="15"></line>
                             </svg>
+                            <h4 class="fw-bold mb-1">BUFFER DE EVIDENCIA</h4>
+                            <p class="text-secondary small">Cargar muestra para análisis de coherencia neuronal</p>
                         </div>
-                        <h4 class="fw-bold mb-1">INSERTAR EVIDENCIA</h4>
-                        <p class="text-secondary">Haz clic o arrastra video/imagen/audio</p>
-                    </div>
-                    <img id="imgPreview" class="d-none">
-                    <video id="videoPreview" controls class="d-none" onclick="event.stopPropagation()"></video>
+                        <img id="imgPreview" class="d-none">
+                        <video id="videoPreview" controls class="d-none" onclick="event.stopPropagation()"></video>
 
-                    <div id="audioWrapper" onclick="event.stopPropagation()">
-                        <div id="waveform"></div>
-                        <p class="text-info small mt-2" style="cursor:pointer; font-family:'JetBrains Mono'"
-                            id="playBtn">▶ REPRODUCIR AUDIO</p>
+                        <div id="audioWrapper" onclick="event.stopPropagation()">
+                            <div id="waveform"></div>
+                            <p class="play-btn" id="playBtn">▶ REPRODUCIR AUDIO</p>
+                        </div>
                     </div>
+
+                    <div class="terminal-wrapper mb-4">
+                        <div class="terminal-header">
+                            <div class="terminal-dots">
+                                <span></span><span></span><span></span>
+                            </div>
+                            <div class="terminal-title">FORENSIC_STREAM // STDOUT</div>
+                            <div class="terminal-session">ID: TS-992</div>
+                        </div>
+                        <div class="terminal-box" id="terminal">
+                            > SISTEMA NEURO-FORENSE LISTO...<br>
+                            > ESPERANDO BUFFER DE ENTRADA...
+                        </div>
+                    </div>
+
+                    <input type="file" id="fileInput" hidden accept="image/*,video/*,audio/*">
+                    <button class="btn btn-scan w-100" id="scanBtn">EJECUTAR ESCANEO</button>
                 </div>
 
-                <div class="terminal-box mb-4" id="terminalLog">
-                    > SISTEMA NEURO-FORENSE LISTO...<br>> ESPERANDO BUFFER DE ENTRADA...
-                </div>
+                <div id="ui-result" class="d-none">
+                    <div id="result-header" class="text-center mb-4">
+                        <div id="status-icon-container" class="mb-3"></div>
+                        <div id="verdict-text" class="h1 mb-0">ANALIZANDO...</div>
+                    </div>
 
-                <input type="file" id="fileInput" hidden accept="image/*,video/*,audio/*">
-                <button class="btn btn-scan w-100" id="scanBtn">EJECUTAR ESCANEO</button>
+                    <div class="gauge-wrapper mb-4">
+                        <svg class="gauge-svg" viewBox="0 0 200 120">
+                            <defs>
+                                <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                    <stop offset="0%" stop-color="#00ffcc" />
+                                    <stop offset="50%" stop-color="#ffcc00" />
+                                    <stop offset="100%" stop-color="#ff4444" />
+                                </linearGradient>
+                            </defs>
+                            <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#222" stroke-width="18"
+                                stroke-linecap="round" />
+                            <path id="gaugePathFill" d="M 20 100 A 80 80 0 0 1 180 100" fill="none"
+                                stroke="url(#gaugeGradient)" stroke-width="18" stroke-linecap="round"
+                                stroke-dasharray="0 251.3" style="transition: stroke-dasharray 1.5s ease-out;" />
+                        </svg>
+                        <div class="needle-container" id="needleBox">
+                            <div class="needle"></div>
+                        </div>
+                        <div class="gauge-bolt"></div>
+                    </div>
+
+                    <h1 class="display-3 fw-bold mb-1 text-center" id="pct-text">0%</h1>
+
+                    <div id="tech-details" class="mt-4 mb-4 d-none">
+                        <div class="row g-2 justify-content-center"
+                            style="font-family: 'JetBrains Mono'; font-size: 0.75rem;">
+                            <div class="col-5 border border-info border-opacity-25 p-2 rounded bg-black bg-opacity-50">
+                                <span class="text-secondary d-block" style="font-size: 0.6rem;">VOZ HUMANA (REAL)</span>
+                                <span id="val-human" class="text-info fw-bold">---</span>
+                            </div>
+                            <div
+                                class="col-5 border border-danger border-opacity-25 p-2 rounded bg-black bg-opacity-50">
+                                <span class="text-secondary d-block" style="font-size: 0.6rem;">VOZ SINTÉTICA
+                                    (IA)</span>
+                                <span id="val-ai" class="text-danger fw-bold">---</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <p id="verdict-note" class="h5 text-secondary mb-5 text-center"></p>
+                    <div class="text-center">
+                        <button class="btn btn-outline-light px-5 py-2" onclick="switchTab('scanner')"
+                            style="border-radius: 10px;">NUEVA CARGA</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Panel de Datos (Historial, Contacto, etc.) -->
+        <section id="dataPanel" class="d-none">
+            <div id="ui-database" class="d-none">
+                <header class="text-center mb-4">
+                    <h1 class="cool-title mb-0">TALOS</h1>
+                    <p class="text-info small forensic-subtitle">FORENSIC RECORDS DATABASE</p>
+                </header>
+                <div class="main-container col-lg-10 mx-auto cyber-corners">
+                    <div class="tech-tag" style="position: absolute; top: 10px; right: 20px;">DATABASE_V1.1</div>
+                    <div class="d-flex justify-content-between align-items-center mb-5 mt-2">
+                        <div class="d-flex align-items-center gap-3">
+                            <div class="pulse-dot"></div>
+                            <h3 class="node-title mb-0" style="font-size: 0.85rem;">SISTEMA DE REGISTROS FORENSES</h3>
+                        </div>
+                        <div class="d-flex gap-3 align-items-center">
+                            <div id="dbStats" class="extra-small fw-bold text-secondary border border-secondary border-opacity-25 px-3 py-1 bg-black bg-opacity-50">REGISTROS: 0</div>
+                            <button class="btn btn-sm btn-outline-danger extra-small fw-bold px-3" onclick="clearDatabase()" style="letter-spacing: 1px;">PURGAR DB</button>
+                        </div>
+                    </div>
+                    
+                    <div class="table-responsive history-scroll-container">
+                        <table class="table table-dark table-hover mb-0 forensic-table">
+                            <thead>
+                                <tr>
+                                    <th>FECHA_REF</th>
+                                    <th>EVIDENCIA_ID</th>
+                                    <th>VEREDICTO_ANALYSIS</th>
+                                    <th class="text-end">OPCIONES</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dbTableBody">
+                                <!-- Se llena dinámicamente -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
 
-            <div id="ui-result" class="d-none">
-                <div id="verdict-text" class="mb-2">ANALIZANDO...</div>
+            <div id="ui-contact" class="d-none">
+                <header class="text-center mb-4">
+                    <h1 class="cool-title mb-1">TALOS</h1>
+                    <p class="text-info small forensic-subtitle">COMMUNICATIONS & FORENSIC SUPPORT</p>
+                </header>
 
-                <div class="gauge-wrapper mb-4">
-                    <svg class="gauge-svg" viewBox="0 0 200 120">
-                        <defs>
-                            <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                                <stop offset="0%" stop-color="#00ffcc" />
-                                <stop offset="50%" stop-color="#ffcc00" />
-                                <stop offset="100%" stop-color="#ff4444" />
-                            </linearGradient>
-                        </defs>
-                        <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#222" stroke-width="18"
-                            stroke-linecap="round" />
-                        <path id="gaugePathFill" d="M 20 100 A 80 80 0 0 1 180 100" fill="none"
-                            stroke="url(#gaugeGradient)" stroke-width="18" stroke-linecap="round"
-                            stroke-dasharray="0 251.3" style="transition: stroke-dasharray 3s ease-out;" />
-                    </svg>
-                    <div class="needle-container" id="needleBox">
-                        <div class="needle"></div>
-                    </div>
-                    <div class="gauge-bolt"></div>
-                </div>
-
-                <h1 class="display-3 fw-bold mb-1" id="pct-text">0%</h1>
-
-                <div id="tech-details" class="mt-4 mb-4 d-none">
-                    <div class="row g-2 justify-content-center"
-                        style="font-family: 'JetBrains Mono'; font-size: 0.75rem;">
-                        <div class="col-5 border border-info border-opacity-25 p-2 rounded bg-black bg-opacity-50">
-                            <span class="text-secondary d-block" style="font-size: 0.6rem;">VOZ HUMANA (REAL)</span>
-                            <span id="val-human" class="text-info fw-bold">---</span>
-                        </div>
-                        <div class="col-5 border border-danger border-opacity-25 p-2 rounded bg-black bg-opacity-50">
-                            <span class="text-secondary d-block" style="font-size: 0.6rem;">VOZ SINTÉTICA (IA)</span>
-                            <span id="val-ai" class="text-danger fw-bold">---</span>
+                <div class="main-container col-lg-10 mx-auto">
+                    <div class="security-banner mb-5">
+                        <div
+                            class="d-flex align-items-center gap-3 p-3 border border-info border-opacity-25 rounded bg-info bg-opacity-10">
+                            <div class="status-indicator">
+                                <div class="dot active"></div>
+                            </div>
+                            <div>
+                                <h6 class="mb-0 text-info fw-bold small">PROTOCOLO ALPHA-7 ACTIVADO</h6>
+                                <p class="mb-0 text-white-50 extra-small">Cifrado de grado militar AES-256 habilitado.
+                                    Todas las sesiones son monitoreadas por integridad.</p>
+                            </div>
                         </div>
                     </div>
-                </div>
 
-                <p id="verdict-note" class="h5 text-secondary mb-5"></p>
-                <button class="btn btn-outline-light px-5 py-2" onclick="location.reload()"
-                    style="border-radius: 10px;">NUEVA CARGA</button>
+                    <div class="row g-4 align-items-stretch">
+                        <!-- Card 01: Soporte Técnico -->
+                        <div class="col-md-4 d-flex">
+                            <div class="contact-node flex-fill">
+                                <div class="node-icon">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2">
+                                        <path
+                                            d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z">
+                                        </path>
+                                        <polyline points="22,6 12,13 2,6"></polyline>
+                                    </svg>
+                                </div>
+                                <h5 class="node-title">SOPORTE TÉCNICO</h5>
+                                <p class="node-desc">Reporte fallos técnicos o errores de detección en el clúster.
+                                </p>
+                                <a href="mailto:support@talos.labs" class="node-link text-info">
+                                    ABRIR TICKET
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="3">
+                                        <line x1="7" y1="17" x2="17" y2="7"></line>
+                                        <polyline points="7 7 17 7 17 17"></polyline>
+                                    </svg>
+                                </a>
+                            </div>
+                        </div>
+
+                        <!-- Card 02: Auditoría Legal -->
+                        <div class="col-md-4 d-flex">
+                            <div class="contact-node flex-fill">
+                                <div class="node-icon">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2">
+                                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                                        <path d="M9 12l2 2 4-4"></path>
+                                    </svg>
+                                </div>
+                                <h5 class="node-title">PERITAJE LEGAL</h5>
+                                <p class="node-desc">Solicite informes certificados para procesos judiciales.</p>
+                                <a href="mailto:legal@talos.labs" class="node-link text-success">
+                                    SOLICITAR
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="3">
+                                        <line x1="7" y1="17" x2="17" y2="7"></line>
+                                        <polyline points="7 7 17 7 17 17"></polyline>
+                                    </svg>
+                                </a>
+                            </div>
+                        </div>
+
+                        <!-- Card 03: Comunidad Privada -->
+                        <div class="col-md-4 d-flex">
+                            <div class="contact-node flex-fill">
+                                <div class="node-icon">
+                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2">
+                                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                                        <circle cx="9" cy="7" r="4"></circle>
+                                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                                        <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                                    </svg>
+                                </div>
+                                <h5 class="node-title">HILO FORENSE</h5>
+                                <p class="node-desc">Canal privado para analistas de firmas de IA avanzada.</p>
+                                <a href="#" class="node-link text-warning">
+                                    UNIRSE
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="3">
+                                        <line x1="7" y1="17" x2="17" y2="7"></line>
+                                        <polyline points="7 7 17 7 17 17"></polyline>
+                                    </svg>
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div
+                        class="mt-5 p-3 border-top border-secondary border-opacity-10 d-flex justify-content-between align-items-center">
+                        <span class="text-secondary extra-small fw-bold">ID SESIÓN: TALOS-AUDIT-9921-X</span>
+                        <div class="d-flex gap-4">
+                            <span class="text-success extra-small fw-bold">ONLINE</span>
+                            <span class="text-secondary extra-small fw-bold">LATENCIA: 14ms</span>
+                        </div>
+                    </div>
+                </div>
             </div>
+
+            <!-- Panel de Academia -->
+            <div id="ui-academy" class="d-none">
+                <header class="text-center mb-3">
+                    <h1 class="cool-title mb-0">TALOS </h1>
+                    <p class="text-info small forensic-subtitle">ACADEMY & KNOWLEDGE HUB</p>
+                </header>
+                <div class="main-container col-lg-10 mx-auto cyber-corners">
+                    <div class="tech-tag">KNOWLEDGE_DB</div>
+
+                    <div class="row g-4 text-start">
+                        <!-- Card 01 -->
+                        <div class="col-md-4">
+                            <div class="academy-card h-100">
+                                <div class="card-icon">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M13.8 12H3" />
+                                    </svg>
+                                </div>
+                                <h6 class="text-success fw-bold uppercase small mb-2">Fundamentos 01</h6>
+                                <h5>BIOMETRÍA Y COHERENCIA</h5>
+                                <p class="small text-secondary mb-0">Análisis de oclusión ocular y reflexión corneal.
+                                    Detección de parpadeo errático y anomalías de borde mediante flujo óptico de
+                                    precisión.</p>
+                                <div class="card-progress"></div>
+                            </div>
+                        </div>
+
+                        <!-- Card 02 -->
+                        <div class="col-md-4">
+                            <div class="academy-card h-100">
+                                <div class="card-icon">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <circle cx="12" cy="12" r="10" />
+                                        <path
+                                            d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                                    </svg>
+                                </div>
+                                <h6 class="text-success fw-bold uppercase small mb-2">Fundamentos 02</h6>
+                                <h5>FÍSICA DEL SENSOR [PRNU]</h5>
+                                <p class="small text-secondary mb-0">Verificación de huella PRNU y periodicidad FFT.
+                                    Identificación de artefactos de muestreo ausentes en sensores físicos reales.</p>
+                                <div class="card-progress color-2"></div>
+                            </div>
+                        </div>
+
+                        <!-- Card 03 -->
+                        <div class="col-md-4">
+                            <div class="academy-card h-100">
+                                <div class="card-icon">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                        <path d="M12 2v20M17 5v14M22 9v6M7 5v14M2 9v6" />
+                                    </svg>
+                                </div>
+                                <h6 class="text-success fw-bold uppercase small mb-2">Fundamentos 03</h6>
+                                <h5>ACÚSTICA GENERATIVA</h5>
+                                <p class="small text-secondary mb-0">Estudio de prosodia y micro-variaciones de presión.
+                                    Análisis de artefactos de fase y coherencia de ruido de fondo ambiental.</p>
+                                <div class="card-progress color-3"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-4 p-4 border border-info border-opacity-20 rounded shadow-lg"
+                        style="background: rgba(0, 255, 204, 0.03);">
+                        <div class="d-flex align-items-start">
+                            <div class="me-3">
+                                <span class="badge bg-info text-dark fw-bold"
+                                    style="font-size: 0.65rem; letter-spacing: 1px;">ADVERTENCIA</span>
+                            </div>
+                            <p class="small mb-0 text-secondary" style="line-height: 1.6; color: #cbd5e0 !important;">
+                                <strong class="text-info">NOTA DE PROTOCOLO:</strong>
+                                La integridad de los análisis depende de la tasa de bits y resolución de la muestra.
+                                Se recomienda el uso de archivos **Lossless** para obtener una firma PRNU inequívoca.
+                                TALOS procesa la evidencia localmente bajo el protocolo de privacidad **ALPHA-7**.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Panel de Desafío -->
+            <div id="ui-challenge" class="d-none">
+                <header class="text-center mb-3">
+                    <h1 class="cool-title mb-0">TALOS </h1>
+                    <p class="text-info small forensic-subtitle">QUALIFICATION SIMULATOR</p>
+                </header>
+                <div class="main-container col-lg-8 mx-auto text-center">
+                    <div id="challenge-intro" class="text-start">
+                        <p class="text-secondary mb-4">Esta simulación evalúa tu capacidad para identificar artefactos
+                            de IA en entornos controlados. Deberás analizar muestras visuales y decidir su origen
+                            basándote en anomalías estructurales.</p>
+                        <ul class="text-secondary small mb-4">
+                            <li>Analiza la coherencia de bordes y texturas.</li>
+                            <li>Busca inconsistencias en la iluminación global.</li>
+                            <li>Identifica firmas repetitivas del modelo neuronal.</li>
+                        </ul>
+                        <button class="btn btn-scan w-100" onclick="startChallenge()">INICIAR PROTOCOLO DE
+                            EXAMEN</button>
+                    </div>
+
+                    <div id="challenge-game" class="d-none">
+                        <p class="text-muted small mb-2">MUESTRA <span id="challenge-current">1</span> / 10</p>
+                        <div id="challenge-media" class="mb-4 border border-secondary rounded bg-black">
+                            <!-- Se llena dinámicamente -->
+                        </div>
+                        <div id="challenge-buttons" class="d-flex gap-3 justify-content-center">
+                            <button class="btn btn-outline-success px-4" onclick="answerChallenge('REAL')">ES
+                                REAL</button>
+                            <button class="btn btn-outline-danger px-4" onclick="answerChallenge('IA')">ES IA</button>
+                        </div>
+                        <div id="challenge-feedback" class="d-none mt-4">
+                            <h4 id="feedback-title" class="mb-2"></h4>
+                            <p id="feedback-reason" class="small text-secondary mb-3"></p>
+                            <button class="btn btn-sm btn-info" onclick="nextChallenge()">SIGUIENTE</button>
+                        </div>
+                    </div>
+
+                    <div id="challenge-result" class="d-none">
+                        <h2 class="text-success mb-2">COMPLETADO</h2>
+                        <p class="h4 mb-4">Puntuación: <span id="challenge-score">0 / 0</span></p>
+                        <button class="btn btn-outline-light" onclick="resetChallenge()">REINTENTAR</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- Modal de Ayuda / Tutorial -->
+    <div class="modal-overlay" id="helpModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="text-start">
+                    <h1 class="cool-title mb-0" style="font-size: 1.5rem;" id="helpTitle">TALOS </h1>
+                </div>
+                <button class="modal-close-btn" id="closeHelp">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <div id="help-scanner">
+                    <div class="guide-step">
+                        <h5>01. PREPARACIÓN DE LA MUESTRA [INPUT]</h5>
+                        <p>Carga archivos en formatos estándar como <strong>JPG, PNG, MP4, WAV o MP3</strong>. Para
+                            obtener la máxima precisión forense, se recomienda utilizar archivos originales sin
+                            compresiones excesivas (evita capturas de pantalla de capturas).</p>
+                        <ul class="text-secondary small mt-2">
+                            <li>Imágenes: Mínimo 512x512px para análisis de Bayer.</li>
+                            <li>Video: Los artefactos son más visibles en zonas de baja iluminación.</li>
+                            <li>Audio: Se requieren al menos 3 segundos de voz continua.</li>
+                        </ul>
+                    </div>
+                    <div class="guide-step">
+                        <h5>02. ANÁLISIS MULTI-CAPA [DECONSTRUCCIÓN]</h5>
+                        <p>Al iniciar el escaneo, TALOS activa tres motores simultáneos:</p>
+                        <ul class="text-secondary small mt-2">
+                            <li><strong>Motor Geométrico:</strong> Busca inconsistencias en sombras y reflejos oculares.
+                            </li>
+                            <li><strong>Motor de Frecuencia (FFT):</strong> Detecta patrones de cuadrícula típicos de
+                                las capas de convolución de las IA generativas.</li>
+                            <li><strong>Huella Digital (PRNU):</strong> Verifica si la imagen tiene el ruido térmico
+                                natural característico de un sensor físico real.</li>
+                        </ul>
+                    </div>
+                    <div class="guide-step">
+                        <h5>03. INTERPRETACIÓN DEL VEREDICTO</h5>
+                        <p>El indicador central muestra la probabilidad de origen sintético:</p>
+                        <ul class="text-secondary small mt-2">
+                            <li><strong>
+                                    &lt; 40% [REAL]:</strong> Probablemente capturado por un dispositivo físico.</li>
+                            <li><strong>40% - 60% [INCIERTO]:</strong> La muestra tiene ediciones pesadas o baja
+                                calidad; requiere inspección humana.</li>
+                            <li><strong>&gt; 60% [IA]:</strong> Trazas matemáticas claras de generación neuronal
+                                detectadas.</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div id="help-database" class="d-none">
+                    <div class="guide-step">
+                        <h5>ALMACENAMIENTO DE EVIDENCIA</h5>
+                        <p>TALOS utiliza un sistema de persistencia local indexado (LocalDB). Esto significa que tus
+                            análisis <strong>nunca abandonan tu ordenador</strong>. La privacidad es total y absoluta
+                            por diseño.</p>
+                    </div>
+                    <div class="guide-step">
+                        <h5>INTEGRIDAD DE LOS REGISTROS</h5>
+                        <p>Los registros incluyen la fecha exacta y los metadatos de la sesión. Si borras el historial
+                            mediante la opción "PURGAR", los datos se eliminan del buffer de memoria del navegador y no
+                            podrán ser recuperados.</p>
+                    </div>
+                </div>
+
+                <div id="help-contact" class="d-none">
+                    <div class="guide-step">
+                        <h5>CANALES DE COMUNICACIÓN SEGURA</h5>
+                        <p>El Centro de Control opera bajo protocolos de encriptación AES-256. Utiliza el canal de
+                            **Soporte Técnico** para incidencias de plataforma y el de **Peritaje Legal** para solicitar
+                            informes certificados con validez jurídica.</p>
+                    </div>
+                    <div class="guide-step">
+                        <h5>COMUNIDAD TALOS</h5>
+                        <p>El acceso al "Hilo Forense" es restringido. Se requiere una validación de identidad para
+                            participar en el intercambio de firmas de IA avanzadas y modelos de difusión experimentales.
+                        </p>
+                    </div>
+                </div>
+
+                <div id="help-academy" class="d-none">
+                    <div class="guide-step">
+                        <h5>PROGRAMA DE FORMACIÓN CONTINUA</h5>
+                        <p>La Academy es un hub de conocimiento diseñado para entrenar el ojo humano en la detección de
+                            artefactos que los algoritmos podrían pasar por alto. Cubre desde biometría hasta física de
+                            sensores.</p>
+                    </div>
+                    <div class="guide-step">
+                        <h5>ACTUALIZACIÓN DE FIRMAS</h5>
+                        <p>Los módulos se actualizan mensualmente con las últimas técnicas de generación (Sora, Flux,
+                            ElevenLabs V3). Completa las lecturas para mejorar tu ratio de éxito en el simulador.</p>
+                    </div>
+                </div>
+
+                <div id="help-challenge" class="d-none">
+                    <div class="guide-step">
+                        <h5>SIMULADOR DE CALIFICACIÓN</h5>
+                        <p>Este examen evalúa tu capacidad de análisis crítico. No utilices herramientas externas;
+                            confía en tu entrenamiento para identificar inconsistencias estructurales en las fuentes
+                            multimedia.</p>
+                    </div>
+                    <div class="guide-step">
+                        <h5>CRITERIOS DE RANGO</h5>
+                        <p>Para obtener la certificación de "Experto Forense", debes lograr un 10/10 en el análisis de
+                            10 muestras consecutivas. Un fallo de detección compromete la validez de la sesión.</p>
+                    </div>
+                </div>
+
+                <button class="btn btn-scan w-100 mt-4" onclick="toggleModal(false)">ENTENDIDO</button>
+            </div>
+            <!-- Footer eliminado por petición de usuario -->
         </div>
     </div>
 
-    <script>
-        let wavesurfer;
-        const fileInput = document.getElementById('fileInput'),
-            dropZone = document.getElementById('dropZone'),
-            terminal = document.getElementById('terminalLog'),
-            scanBtn = document.getElementById('scanBtn');
+    <!-- Footer Técnico (Status Bar) -->
+    <footer class="tech-footer">
+        <div class="footer-segment">
+            <span class="segment-label">SYSTEM_TIME:</span>
+            <span id="footer-clock">00:00:00.000</span>
+        </div>
+        <div class="footer-segment d-none d-md-flex">
+            <span class="segment-label">SECURE_TUNNEL:</span>
+            <span class="text-success blink-fast">AES-256_ACTIVE</span>
+        </div>
+        <div class="footer-segment d-none d-lg-flex">
+            <span class="segment-label">NODE_LOG:</span>
+            <span class="ticker-text" id="footer-ticker">SISTEMA INICIALIZADO... ESPERANDO BUFFER</span>
+        </div>
+        <div class="footer-segment ms-auto">
+            <span class="segment-label">AUTH:</span>
+            <span class="text-info">TALOS_ADMIN_V10.3</span>
+        </div>
+    </footer>
 
-        function addLog(t) {
-            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            terminal.innerHTML += `<br>> [${time}] ${t}`;
-            terminal.scrollTop = terminal.scrollHeight;
-        }
-
-        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(n => {
-            dropZone.addEventListener(n, e => { e.preventDefault(); e.stopPropagation(); });
-        });
-        dropZone.addEventListener('dragover', () => dropZone.classList.add('drag-over'));
-        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-        dropZone.addEventListener('drop', e => {
-            dropZone.classList.remove('drag-over');
-            handleFile(e.dataTransfer.files[0]);
-        });
-
-        dropZone.onclick = (e) => {
-            if (e.target.tagName !== 'VIDEO' && !e.target.closest('#audioWrapper')) fileInput.click();
-        };
-        fileInput.onchange = () => handleFile(fileInput.files[0]);
-
-        function handleFile(file) {
-            if (!file) return;
-            const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files;
-            document.getElementById('uploadContent').classList.add('d-none');
-            const url = URL.createObjectURL(file);
-
-            document.getElementById('imgPreview').classList.add('d-none');
-            document.getElementById('videoPreview').classList.add('d-none');
-            document.getElementById('audioWrapper').style.display = 'none';
-            if (wavesurfer) wavesurfer.destroy();
-
-            addLog(`EVIDENCIA CARGADA: ${file.name.toUpperCase()}`);
-
-            if (file.type.startsWith('image/')) {
-                const img = document.getElementById('imgPreview'); img.src = url; img.classList.remove('d-none');
-            } else if (file.type.startsWith('video/')) {
-                const vid = document.getElementById('videoPreview'); vid.src = url; vid.classList.remove('d-none');
-            } else if (file.type.startsWith('audio/')) {
-                const wrapper = document.getElementById('audioWrapper');
-                wrapper.style.display = 'block';
-
-                wavesurfer = WaveSurfer.create({
-                    container: '#waveform',
-                    waveColor: 'rgba(0, 255, 204, 0.2)',
-                    progressColor: '#00ffcc',
-                    cursorColor: '#ff0055',
-                    barWidth: 3,
-                    barGap: 2,
-                    barRadius: 2,
-                    height: 60
-                });
-                wavesurfer.load(url);
-                document.getElementById('playBtn').onclick = () => wavesurfer.playPause();
-            }
-        }
-
-        scanBtn.onclick = async () => {
-            if (!fileInput.files[0]) return alert("Carga un archivo.");
-            document.getElementById('scanner').style.display = "block";
-            scanBtn.disabled = true;
-            addLog("EXTRAYENDO PATRONES NEURONALES...");
-
-            const fd = new FormData(); fd.append('file', fileInput.files[0]);
-            try {
-                const res = await fetch('http://127.0.0.1:8000/analizar', { method: 'POST', body: fd });
-                const data = await res.json();
-
-                setTimeout(() => {
-                    document.getElementById('ui-upload').classList.add('d-none');
-                    document.getElementById('ui-result').classList.remove('d-none');
-
-                    const prob = data.probabilidad;
-                    const vText = document.getElementById('verdict-text');
-
-                    // Lógica de Veredicto
-                    if (prob > 50) {
-                        vText.innerText = "GENERADO POR IA";
-                        vText.style.color = "var(--danger)";
-                        vText.style.textShadow = "0 0 15px var(--danger)";
-                    } else {
-                        vText.innerText = "ORIGEN HUMANO";
-                        vText.style.color = "var(--success)";
-                        vText.style.textShadow = "0 0 15px var(--success)";
-                    }
-
-                    // Llenado de Datos Técnicos (Nuevo)
-                    if (data.detalles && data.detalles.predicciones) {
-                        document.getElementById('tech-details').classList.remove('d-none');
-                        // Mostramos los valores que nos da el modelo Hemgg
-                        document.getElementById('val-human').innerText = data.detalles.predicciones['HumanVoice'] || "0%";
-                        document.getElementById('val-ai').innerText = data.detalles.predicciones['AIVoice'] || "0%";
-                        addLog(`TELEMETRÍA: IA ${data.detalles.predicciones['AIVoice']} | HUMANO ${data.detalles.predicciones['HumanVoice']}`);
-                    }
-
-                    const rot = (prob * 180) / 100 - 180;
-                    document.getElementById('needleBox').style.transform = `rotate(${rot}deg)`;
-                    const fill = document.getElementById('gaugePathFill');
-                    fill.style.strokeDasharray = `${(prob * 251.3) / 100} 251.3`;
-
-                    document.getElementById('pct-text').innerText = prob + "% IA";
-                    document.getElementById('verdict-note').innerText = data.nota;
-
-                    if (prob > 70) document.getElementById('mainPanel').style.borderColor = "var(--danger)";
-
-                    addLog("ANÁLISIS COMPLETADO.");
-                }, 2000);
-            } catch (e) {
-                addLog("ERROR CRÍTICO: CONEXIÓN PERDIDA.");
-                scanBtn.disabled = false;
-                document.getElementById('scanner').style.display = "none";
-            }
-        };
-    </script>
+    <!-- Scripts Externos -->
+    <script src="script.js"></script>
 </body>
 
 </html>
