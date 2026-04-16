@@ -36,11 +36,8 @@ class CalibratedEnsembleScorer:
 
     # Umbrales de veredicto
     VERDICT_THRESHOLDS = {
-        "SINTÉTICO":               0.75,
-        "PROBABLEMENTE SINTÉTICO": 0.55,
-        "INDETERMINADO":           0.35,
-        "PROBABLEMENTE REAL":      0.20,
-        "ORGÁNICO":                0.0,
+        "IA":                      0.50,  # V10.3 Standard
+        "REAL":                    0.00,  
     }
 
     # Firmas de modelos generativos específicos
@@ -60,6 +57,24 @@ class CalibratedEnsembleScorer:
             "ghosting_ratio_min":       0.08,    # Ghosting característico
             "texture_inconsistency_min":0.15,    # Texturas que cambian sin movimiento
             "lighting_jump_min":        0.10,    # Saltos de iluminación
+        },
+        "Flux.1 / SDXL": {
+            "noise_std_max":            1.5,     # Ruido ultra-suave o inexistente
+            "upscale_fft_min":          0.12,    # Artefactos de latentes de alta frecuencia
+            "prnu_corr_max":            0.01,    # Ausencia total de ruido de sensor
+            "vit_suspicion_min":        0.85     # Alta confianza de ViT en 'estética'
+        },
+        "Midjourney v6": {
+            "noise_std_max":            2.5,     # MJv6 simula grano pero es uniforme
+            "ela_splice_min":           0.08,    # Pequeñas inconsistencias en bordes complejos
+            "cb_diff_min":              12.0,    # Saturación y contraste 'perfectos'
+            "vit_suspicion_min":        0.90
+        },
+        "DALL-E 3": {
+            "noise_std_range":          (0.8, 1.8),
+            "upscale_fft_min":          0.15,    # Artefactos característicos de DALL-E
+            "cb_diff_max":              5.0,     # Suavizado de color extremo
+            "vit_suspicion_min":        0.80
         },
         "DeepFace/FaceSwap": {
             "cb_diff_min":              8.0,     # Desajuste crominancia
@@ -81,13 +96,16 @@ class CalibratedEnsembleScorer:
         self.weights = dict(self.DEFAULT_WEIGHTS)
         
         # Calibradores Platt (sigmoid) por módulo
-        # Formato: (a, b) donde P_cal = 1 / (1 + exp(a * raw_score + b))
+        # Calibradores Platt (sigmoid) por módulo
+        # Ajustados para 'soft floors': empujan los scores intermedios (0.4-0.6)
+        # hacia abajo (Orgánico) para proteger videos reales altamente comprimidos.
         self._platt_params = {
-            "vit_ensemble":  (-4.0, 2.0),
-            "temporal":      (-7.0, 3.5),
-            "facial":        (-6.0, 3.0),
-            "forensic":      (-7.0, 3.5),
+            "vit_ensemble":  (-9.0, 6.0),  # [ADJ V8.4] Sensibilidad aumentada para señales 0.7-0.9
+            "temporal":      (-8.0, 4.5),
+            "facial":        (-7.0, 3.8),
+            "forensic":      (-8.0, 4.5),
             "audio":         (-5.0, 2.5),
+            "deep_sync":     (-6.0, 3.0),  # Tolerancia añadida para fallos de sync de Bluetooth en videos reales
         }
 
         if weights_path and os.path.exists(weights_path):
@@ -245,6 +263,48 @@ class CalibratedEnsembleScorer:
                 if lum_jump > signature["lighting_jump_min"]:
                     match_score += 0.5
 
+            # Flux.1 / SDXL
+            elif model_name == "Flux.1 / SDXL":
+                forensic = module_results.get("forensic", {})
+                vit      = module_results.get("vit_ensemble", {})
+                noise_s  = forensic.get("noise_signature", {}).get("noise_std", 10.0)
+                upsc     = forensic.get("upscaling", {}).get("upscale_fft_ratio", 0.0)
+                prnu     = forensic.get("prnu", {}).get("prnu_consecutive_corr", 1.0)
+                vit_s    = vit.get("suspicion", 0.0)
+
+                if noise_s < signature.get("noise_std_max", 1.5): match_score += 1
+                if upsc > signature.get("upscale_fft_min", 0.12):  match_score += 1
+                if prnu < signature.get("prnu_corr_max", 0.01):    match_score += 1
+                if vit_s > signature.get("vit_suspicion_min", 0.85): match_score += 1
+
+            # Midjourney v6
+            elif model_name == "Midjourney v6":
+                forensic = module_results.get("forensic", {})
+                facial   = module_results.get("facial", {})
+                vit      = module_results.get("vit_ensemble", {})
+                noise_s  = forensic.get("noise_signature", {}).get("noise_std", 10.0)
+                ela      = forensic.get("ela_splice", {}).get("ela_splice_score", 0.0)
+                cb_diff  = facial.get("skin_chrominance", {}).get("cb_diff", 0.0)
+                vit_s    = vit.get("suspicion", 0.0)
+
+                if noise_s < signature.get("noise_std_max", 2.5): match_score += 1
+                if ela > signature.get("ela_splice_min", 0.08):   match_score += 0.5
+                if cb_diff > signature.get("cb_diff_min", 12.0):  match_score += 1
+                if vit_s > signature.get("vit_suspicion_min", 0.90): match_score += 1
+
+            # DALL-E 3
+            elif model_name == "DALL-E 3":
+                forensic = module_results.get("forensic", {})
+                vit      = module_results.get("vit_ensemble", {})
+                noise_s  = forensic.get("noise_signature", {}).get("noise_std", 10.0)
+                upsc     = forensic.get("upscaling", {}).get("upscale_fft_ratio", 0.0)
+                vit_s    = vit.get("suspicion", 0.0)
+                
+                r = signature.get("noise_std_range", (0.8, 1.8))
+                if r[0] <= noise_s <= r[1]: match_score += 1
+                if upsc > signature.get("upscale_fft_min", 0.15): match_score += 1
+                if vit_s > signature.get("vit_suspicion_min", 0.80): match_score += 1
+
             # DeepFace/FaceSwap
             elif model_name == "DeepFace/FaceSwap":
                 facial   = module_results.get("facial", {})
@@ -315,12 +375,20 @@ class CalibratedEnsembleScorer:
 
         if not raw_scores:
             return {
-                "probability":  50.0,
-                "confidence":   0.0,
-                "ci_lower":     20.0,
-                "ci_upper":     80.0,
-                "verdict":      "INDETERMINADO",
-                "error":        "Ningún módulo produjo scores válidos"
+                "probability":         50.0,
+                "confidence":          0.0,
+                "ci_lower":            20.0,
+                "ci_upper":            80.0,
+                "verdict":             "REAL",
+                "ai_model_likely":     "Desconocido (Timeout Total)",
+                "ai_model_confidence": 0.0,
+                "reasons":             ["Todos los analizadores han fallado o excedieron el límite de tiempo."],
+                "module_scores":       {},
+                "raw_scores":          {},
+                "shap_contributions":  {},
+                "modules_used":        [],
+                "n_modules":           0,
+                "error":               "Ningún módulo produjo scores válidos"
             }
 
         # Calibrar scores con Platt scaling
@@ -332,29 +400,64 @@ class CalibratedEnsembleScorer:
         # Pesos efectivos (redistribuidos si faltan módulos)
         eff_weights = self._get_effective_weights(list(calibrated.keys()))
 
-        # Attention Weighting: Si un detector especialista está gritando ALARMA (> 0.55)
-        # en un video, le damos un bonus de 'atención' temporal sobre los demás. 
-        # Esto permite que un error detectado por ViT no sea ahogado por la "perfección"
-        # forense de Sora/Runway, pero sin forzar límites estadísticos.
+        # [ADJ V8.4-RECALL] Permitir que módulos especialistas (Audio/ViT) tomen el control 
+        # ante sospechas claras. Si el audio es IA, el video NO debe ahogar la alerta.
         for k, v in calibrated.items():
-            # El multiplicador de atención permite que un módulo "especialista" domine
-            # si detecta algo muy claro, pero no todos los módulos son igual de fiables.
             mult = 1.0
-            if v > 0.85:   mult = 4.0  # Alarma absoluta
-            elif v > 0.70: mult = 2.2  # Alarma crítica
-            elif v > 0.55: mult = 1.5  # Sospecha moderada
+            if v > 0.85:   mult = 4.5  # Alarma absoluta
+            elif v > 0.70: mult = 2.5  # Alarma crítica
+            elif v > 0.50: mult = 1.8  # Sospecha
 
-            # Los módulos visuales (ViT) son propensos a falsos positivos por compresión.
-            # Limitamos su capacidad de "gritar" solos sin apoyo de otros módulos.
-            if k == "vit_ensemble":
-                mult = 1.0 + (mult - 1.0) * 0.5  # Reducir potencia de atención al 50%
+            # Multiplicador extra para Audio y ViT cuando cruzan el umbral de sospecha inicial
+            # Esto es vital para detectar 'Dubbing' o 'FaceSwap' donde el fondo es real.
+            if k in ["audio", "vit_ensemble"] and v > 0.30:
+                mult *= 2.8
             
             eff_weights[k] *= mult
                 
-        # Normalizar pesos post-atención
+        # Normalizar pesos post-atención (antes del threshold híbrido)
         weight_sum = sum(eff_weights.values())
         if weight_sum > 0:
             eff_weights = {k: v / weight_sum for k, v in eff_weights.items()}
+
+        # ----------------------------------------------------
+        # OPCIÓN 3: Threshold Híbrido en ViT (Confiabilidad)
+        # ----------------------------------------------------
+        # ViT es muy susceptible a filtros artísticos de corrección de color (LUTs) o filtros de TikTok.
+        # Si ViT grita "IA" pero la física de la cámara (Forensic) y la cinemática (Temporal) están limpias,
+        # significa que la estructura del video es real y solo tiene una capa de píxeles alterada.
+        if calibrated.get("vit_ensemble", 0.0) > 0.70:
+            forensic_score = calibrated.get("forensic", 0.0)
+            temporal_score = calibrated.get("temporal", 0.0)
+            
+            # Si ambos módulos de la "realidad física" apuntan a que es orgánico (< 0.40)
+            if forensic_score < 0.40 and temporal_score < 0.40:
+                eff_weights["vit_ensemble"] = 0.005  # Anulamos su voto a casi cero
+                calibrated["vit_ensemble"] = 0.50    # Lo devolvemos al punto neutro
+                
+                # Volvemos a normalizar pesos tras la castración del ViT
+                weight_sum = sum(eff_weights.values())
+                if weight_sum > 0:
+                    eff_weights = {k: v / weight_sum for k, v in eff_weights.items()}
+
+        # ----------------------------------------------------
+        # OPCIÓN 4: Rescate Forense (Anti-Compresión)
+        # ----------------------------------------------------
+        # Si el módulo Forense (PRNU/Noise) detecta anomalía extrema (>0.90) 
+        # pero es el ÚNICO (Temporal y Facial limpios), y el video es de bajo bitrate,
+        # es casi seguro un falso positivo por compresión/filtros.
+        if calibrated.get("forensic", 0.0) > 0.90:
+            t_score = calibrated.get("temporal", 0.0)
+            f_score = calibrated.get("facial", 0.0)
+            if t_score < 0.25 and f_score < 0.25:
+                # Comprobar bitrate del video si está disponible (pasado en metadata)
+                # Por ahora, castramos el peso si detectamos esta asimetría sospechosa.
+                eff_weights["forensic"] *= 0.1  # Reducimos su impacto drásticamente
+                
+                # Re-normalizar pesos
+                weight_sum = sum(eff_weights.values())
+                if weight_sum > 0:
+                    eff_weights = {k: v / weight_sum for k, v in eff_weights.items()}
 
         # Score ponderado final
         # Suma ponderada conservadora (Los pesos definen qué test es más robusto globalmente)
@@ -379,25 +482,46 @@ class CalibratedEnsembleScorer:
             key=lambda x: -x[2]  # Ordenar por score calibrado
         )[:3]
 
-        reasons_text = []
-        for mod, shap_val, cal_score in top_reasons:
-            if cal_score > 0.5:
-                reasons_text.append(f"{mod} ({cal_score*100:.0f}%)")
-
-        # Veredicto
-        verdict = "ORGÁNICO"
+        # ----------------------------------------------------
+        # OPCIÓN 1: Desacoplar el Profiling (Veredicto Técnico Puro)
+        # ----------------------------------------------------
+        # El veredicto de sospecha se basa únicamente en señales físicas/biométricas.
+        # La identificación de firmas (Gemini, Sora, etc.) no debe inflar el score técnico.
+        
+        verdict = "REAL"
         for label, threshold in sorted(self.VERDICT_THRESHOLDS.items(), key=lambda x: -x[1]):
             if weighted_prob >= threshold:
                 verdict = label
                 break
 
-        # Identificar modelo generativo solo si hay sospecha real
-        if weighted_prob >= 0.50:
+        # Identificar modelo para el profiling informativo
+        # Lo intentamos si hay sospecha mínima (p > 0.35) para no forzar firmas en lo "Real"
+        if weighted_prob >= 0.35:
             ai_model, ai_model_confidence = self._identify_ai_model(module_results)
         else:
             ai_model = "N/A (Firma Orgánica Fuerte)"
             ai_model_confidence = 0.0
+
+        # Limpieza de razones y firma si el veredicto técnico es REAL
+        if verdict == "REAL":
             reasons_text = ["Ninguna anomalía domina. Las firmas apuntan a captura óptica real."]
+            ai_model = "N/A (Captura Real)"
+            ai_model_confidence = 0.0
+        else:
+             # Generar razones detalladas para casos sospechosos/IA
+             descriptions = {
+                "vit_ensemble": "Inconsistencias estéticas en la arquitectura profunda (ViT)",
+                "forensic":     "Anomalías en la señal de ruido y frecuencia (FFT/PRNU)",
+                "facial":       "Biometría facial incoherente o microexpresiones sintéticas",
+                "temporal":     "Discontinuidades cinemáticas en el flujo óptico (Jacobiano)",
+                "audio":        "Artefactos espectrales y falta de respiración natural",
+                "deep_sync":    "Desfase fonema-visema de alta frecuencia",
+             }
+             reasons_text = [
+                f"{descriptions.get(mod, f'Detección en módulo {mod}')}: {cal*100:.1f}% de confianza"
+                for mod, _, cal in top_reasons if cal > 0.5
+             ]
+
 
         return {
             "probability":         round(float(weighted_prob * 100), 1),

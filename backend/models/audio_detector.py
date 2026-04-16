@@ -580,6 +580,12 @@ class AnalysisResult:
                 "evidencias_ia": f.evidence_count,
                 "exoneraciones": f.exoneration_count,
                 "razones": f.reasons,
+                "predicciones": {
+                    "IA": f"{int(self.probabilidad)}%",
+                    "Humano": f"{100 - int(self.probabilidad)}%",
+                    "AIVoice": f"{int(self.probabilidad)}%",
+                    "HumanVoice": f"{100 - int(self.probabilidad)}%",
+                },
                 "metricas_avanzadas": {
                     "cqt_var": f"{f.cqt_harmonic_var:.3f}",
                     "lfcc_var": f"{f.lfcc_hf_variance:.3f}",

@@ -63,7 +63,7 @@ class FacialBiometricsAnalyzer:
             import mediapipe as mp
             self._mp = mp
             self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=False,
+                static_image_mode=True,  # [OPT] Mejor para frames muestreados (no-continuos)
                 max_num_faces=1,
                 refine_landmarks=True,   # 478 puntos incluyendo iris
                 min_detection_confidence=0.5,
@@ -134,7 +134,9 @@ class FacialBiometricsAnalyzer:
         blinks_per_min = len(blink_events) / max(duration_s, 1.0) * 60.0
 
         if not blink_events:
-            suspicion = 0.7 if duration_s > 4 else 0.3
+            # [FIX] Si el FPS es bajo (<10), es estadísticamente probable perder parpadeos. 
+            # No penalizamos la ausencia en videos muestreados.
+            suspicion = 0.3 if (duration_s < 4 or fps < 10) else 0.7
             return {
                 "blink_count":        0,
                 "blinks_per_min":     0.0,

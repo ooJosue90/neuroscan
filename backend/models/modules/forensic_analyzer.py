@@ -237,6 +237,60 @@ class ForensicAnalyzer:
         }
 
     # ------------------------------------------------------------------
+    # Detección de patrones de cuadrícula (GAN/Diffusion signatures)
+    # ------------------------------------------------------------------
+    def _analyze_frequency_grid(self, frames_gray: List[np.ndarray]) -> Dict:
+        """
+        Detecta artefactos de rejilla (checkerboard) en el espectro de frecuencia.
+        GANs y modelos de Difusión dejan picos periódicos en el dominio FFT
+        debido a las capas de upsampling (ConvTranspose2d o Nearest+Conv).
+        """
+        grid_scores = []
+        
+        step = max(1, len(frames_gray) // 6)
+        for gray in frames_gray[::step]:
+            h, w = gray.shape
+            # Tomar un parche central cuadrado para FFT limpia
+            s = min(h, w, 512)
+            y, x = (h - s) // 2, (w - s) // 2
+            roi = gray[y:y+s, x:x+s]
+            
+            f = np.fft.fft2(roi.astype(float))
+            fshift = np.fft.fftshift(f)
+            magnitude_spectrum = np.log(np.abs(fshift) + 1e-8)
+            
+            # Normalizar espectro
+            mag_min, mag_max = magnitude_spectrum.min(), magnitude_spectrum.max()
+            mag_norm = (magnitude_spectrum - mag_min) / (mag_max - mag_min + 1e-8)
+            
+            # Buscar picos en las esquinas del espectro de alta frecuencia
+            # (típicamente donde se manifiestan los patrones de de-convolución)
+            cy, cx = s // 2, s // 2
+            # Zonas de interés: picos simétricos lejos del centro
+            peak_zones = [
+                mag_norm[cy-100:cy-40, cx-100:cx-40],
+                mag_norm[cy-100:cy-40, cx+40:cx+100],
+                mag_norm[cy+40:cy+100, cx-100:cx-40],
+                mag_norm[cy+40:cy+100, cx+40:cx+100]
+            ]
+            
+            max_peaks = [float(np.max(z)) if z.size > 0 else 0.0 for z in peak_zones]
+            grid_scores.append(float(np.mean(max_peaks)))
+
+        if not grid_scores:
+            return {"grid_peak_score": 0.0, "suspicion": 0.1}
+            
+        avg_grid = float(np.mean(grid_scores))
+        # Los generadores modernos son más limpios, pero aún dejan rastro en > 0.45
+        suspicion = min(1.0, max(0.0, (avg_grid - 0.40) / 0.20))
+        
+        return {
+            "grid_peak_score": round(avg_grid, 4),
+            "grid_max_score":  round(float(np.max(grid_scores)), 4),
+            "suspicion":       round(suspicion, 3)
+        }
+
+    # ------------------------------------------------------------------
     # Análisis de ruido de sensor vs ruido sintético
     # ------------------------------------------------------------------
     def _analyze_noise_signature(self, frames_gray: List[np.ndarray]) -> Dict:
@@ -472,6 +526,7 @@ class ForensicAnalyzer:
             fut_noise   = executor.submit(self._analyze_noise_signature, frames_gray)
             fut_light   = executor.submit(self._analyze_lighting_consistency, frames_bgr)
             fut_srm     = executor.submit(self._analyze_srm_features, frames_gray)
+            fut_grid    = executor.submit(self._analyze_frequency_grid, frames_gray)
 
             prnu_result      = fut_prnu.result()
             ela_result       = fut_ela.result()
@@ -479,6 +534,7 @@ class ForensicAnalyzer:
             noise_result     = fut_noise.result()
             lighting_result  = fut_light.result()
             srm_result       = fut_srm.result()
+            grid_result      = fut_grid.result()
 
         # Pesos de cada sub-análisis
         sub_suspicions = {
@@ -487,16 +543,18 @@ class ForensicAnalyzer:
             "upscale":  upscale_result["suspicion"],
             "noise":    noise_result["suspicion"],
             "lighting": lighting_result["suspicion"],
-            "srm":      srm_result["suspicion"]
+            "srm":      srm_result["suspicion"],
+            "grid":     grid_result["suspicion"]
         }
 
         weights = {
-            "prnu":     0.30,
-            "ela":      0.20,
-            "upscale":  0.15,
+            "prnu":     0.25,
+            "ela":      0.15,
+            "upscale":  0.10,
             "noise":    0.20,
-            "lighting": 0.10,
-            "srm":      0.05
+            "lighting": 0.05,
+            "srm":      0.05,
+            "grid":     0.20
         }
 
         total = sum(sub_suspicions[k] * weights[k] for k in sub_suspicions)
@@ -516,5 +574,6 @@ class ForensicAnalyzer:
             "noise_signature":      noise_result,
             "lighting_consistency": lighting_result,
             "srm":                  srm_result,
+            "frequency_grid":       grid_result,
             "available":            True
         }

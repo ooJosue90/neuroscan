@@ -1,11 +1,13 @@
 import base64
 import io
+import json
 import hashlib
 import logging
 import warnings
 import concurrent.futures
 from collections import OrderedDict
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -20,6 +22,9 @@ try:
     import open_clip
 except ImportError:
     open_clip = None
+
+# [V10.3] Importación de Hive
+from models.modules.hive_analyzer import HiveAnalyzer
 
 warnings.filterwarnings("ignore")
 import os
@@ -36,6 +41,9 @@ transformers.utils.logging.set_verbosity_warning()
 
 _MAX_IMAGE_BYTES  = 50 * 1024 * 1024   # 50 MB raw bytes
 _MAX_IMAGE_PIXELS = 4096 * 4096        # ~16 Mpx
+
+# Checkpoint rama híbrida (CLIP + EfficientNet + FFT + residual), opcional
+_HYBRID_CKPT = Path(__file__).resolve().parent / "checkpoints" / "ai_image_detector_quick.pt"
 
 # ═══════════════════════════════════════════════════════════════
 # RESOLUCIONES NATIVAS DE GENERADORES IA
@@ -145,6 +153,20 @@ class ThresholdConfig:
     metadata_confirmed_ai_weight: float  = 95.0
     metadata_c2pa_unsigned_weight: float = 20.0
     metadata_real_camera_weight: float   = -75.0
+
+    # ── THE HIVE V3 ──────────────────────────────────────────────
+    enable_hive: bool = True
+    timeout_hive: float = 30.0
+    hive_ai_threshold: float = 80.0  # Umbral para refuerzo agresivo
+
+    # ── Rama híbrida (ai_image_detector + checkpoint local) ─────────
+    # Fusiona con el score neural HF antes del MetaClassifier.
+    enable_hybrid_image_branch: bool = True
+    hybrid_blend_weight: float = 0.40  # peso del híbrido en la señal neural previa al MetaClassifier
+    # Ajuste tardío asimétrico sobre prob. final (solo si el híbrido está seguro)
+    hybrid_final_nudge_weight: float = 0.18
+    hybrid_nudge_high_threshold: float = 0.55  # por encima: reforzar IA
+    hybrid_nudge_low_threshold: float = 0.42   # por debajo: suavizar hacia REAL
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2126,14 +2148,34 @@ class NueroscanEngineV9:
         self._model_caches: Dict[str, _LRUCache] = {}
 
         cfg = config or ThresholdConfig()
+        self._threshold_cfg = cfg
         self.extractor         = UniversalFeatureExtractor()
         self.meta_classifier   = MetaClassifier(cfg)
         self.metadata_analyzer = MetadataAnalyzer()
         self.ela_analyzer      = ELAAnalyzer(quality=cfg.ela_quality)
         self.fingerprinter     = AIGeneratorFingerprinter()
 
+        self._hybrid_model: Optional[Any] = None
+        self._hybrid_processor: Optional[Any] = None
+        self._hybrid_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._hybrid_lock = Lock()
+        self._hybrid_load_error: Optional[str] = None
+        self._hybrid_calibration: Dict[str, Any] = {}
+
         self._load_models()
+        self._load_hybrid_calibration()
         self._config_hash = f"V10.2-{hashlib.md5(str(cfg).encode()).hexdigest()[:8]}"
+
+    def _load_hybrid_calibration(self):
+        """Carga el umbral optimizado desde el archivo de calibración."""
+        calib_path = _HYBRID_CKPT.with_name("ai_image_detector_quick_calibration.json")
+        if calib_path.exists():
+            try:
+                self._hybrid_calibration = json.loads(calib_path.read_text(encoding="utf-8"))
+                thr = self._hybrid_calibration.get("threshold", 0.5)
+                logger.info("Calibración híbrida cargada: umbral=%s", thr)
+            except Exception as e:
+                logger.warning("Fallo al cargar calibración: %s", e)
 
     def _load_models(self):
         """MEJORA 5: Carga desde MODEL_REGISTRY con versioning y fallback."""
@@ -2221,6 +2263,86 @@ class NueroscanEngineV9:
             return 50.0
         return float(sum(weighted_scores) / sum(weights))
 
+    def _hybrid_env_enabled(self) -> bool:
+        return os.getenv("NUEROSCAN_HYBRID_IMAGE", "1").strip().lower() not in ("0", "false", "no")
+
+    def _ensure_hybrid(self) -> None:
+        if not self._threshold_cfg.enable_hybrid_image_branch or not self._hybrid_env_enabled():
+            return
+        if self._hybrid_model is not None:
+            return
+        if self._hybrid_load_error is not None:
+            return
+        with self._hybrid_lock:
+            if self._hybrid_model is not None or self._hybrid_load_error is not None:
+                return
+            if not _HYBRID_CKPT.exists():
+                self._hybrid_load_error = "checkpoint_missing"
+                logger.warning("Rama híbrida desactivada: no existe %s", _HYBRID_CKPT)
+                return
+            try:
+                from models.modules.ai_image_detector import AIImageDetector, get_processor
+
+                model = AIImageDetector().to(self._hybrid_device)
+                model.eval()
+                with torch.no_grad():
+                    _ = model(torch.rand(2, 3, 224, 224, device=self._hybrid_device))
+                try:
+                    state = torch.load(_HYBRID_CKPT, map_location=self._hybrid_device, weights_only=False)
+                except TypeError:
+                    state = torch.load(_HYBRID_CKPT, map_location=self._hybrid_device)
+                model.load_state_dict(state["model_state_dict"], strict=False)
+                
+                # Aplicar umbral calibrado si existe
+                calib_thr = self._hybrid_calibration.get("threshold")
+                if calib_thr is not None:
+                    model.set_threshold(float(calib_thr))
+                
+                self._hybrid_model = model
+                self._hybrid_processor = get_processor()
+                logger.info("Rama híbrida imagen activa: %s", _HYBRID_CKPT)
+            except Exception as exc:
+                self._hybrid_load_error = str(exc)
+                logger.warning("Rama híbrida no pudo cargarse: %s", exc)
+
+    def _score_hybrid_branch(self, img_pil: Image.Image) -> Optional[Dict[str, Any]]:
+        """Devuelve diccionario con prob_ai e is_ai, o None."""
+        if not self._threshold_cfg.enable_hybrid_image_branch or not self._hybrid_env_enabled():
+            return None
+        self._ensure_hybrid()
+        if self._hybrid_model is None or self._hybrid_processor is None:
+            return None
+        try:
+            with torch.no_grad():
+                pv = self._hybrid_processor(images=img_pil, return_tensors="pt")["pixel_values"].to(
+                    self._hybrid_device
+                )
+                # predict_proba ahora devuelve Dict[str, any]
+                out = self._hybrid_model.predict_proba(pv)
+                return {
+                    "prob_ai": float(out["prob_ai"].squeeze().item()),
+                    "is_ai": bool(out["is_ai"].squeeze().item() > 0.5)
+                }
+        except Exception as exc:
+            logger.warning("_score_hybrid_branch falló: %s", exc)
+            return None
+
+    @staticmethod
+    def _blend_neural_with_hybrid(nn_legacy: float, hybrid_res: Optional[Dict[str, Any]], weight: float) -> Tuple[float, Optional[float]]:
+        if hybrid_res is None:
+            return nn_legacy, None
+        
+        hybrid_prob = hybrid_res["prob_ai"]
+        w = max(0.0, min(1.0, float(weight)))
+        hybrid_pct = hybrid_prob * 100.0
+        
+        # Si la neurona híbrida está 100% segura (calibrada), aumentamos su peso en el blend
+        if hybrid_res.get("is_ai"):
+            w = min(0.90, w * 1.5)
+            
+        blended = (1.0 - w) * nn_legacy + w * hybrid_pct
+        return float(blended), float(hybrid_pct)
+
     @staticmethod
     def _validate_input(data: bytes) -> None:
         if len(data) > _MAX_IMAGE_BYTES:
@@ -2277,14 +2399,37 @@ class NueroscanEngineV9:
                 }
                 return {**res, "data": res, "result": res, "response": res}
 
-            # Análisis paralelo
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                f_neural   = pool.submit(self._score_neural, img_hash, img_pil)
+            # Análisis paralelo (neural legacy + rama híbrida opcional + metadata + ELA + HIVE)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+                f_neural = pool.submit(self._score_neural, img_hash, img_pil)
+                f_hybrid = pool.submit(self._score_hybrid_branch, img_pil)
                 f_metadata = pool.submit(self.metadata_analyzer.analyze, data, img_pil_raw)
-                f_ela      = pool.submit(self.ela_analyzer.analyze, data, img_pil)
-                nn_prob  = f_neural.result()
+                f_ela = pool.submit(self.ela_analyzer.analyze, data, img_pil)
+                
+                # [V10.3 Upgrade] Integración Hive para Imágenes
+                def run_hive():
+                    if not self._threshold_cfg.enable_hive:
+                        return {"available": False}
+                    try:
+                        hive = HiveAnalyzer()
+                        return hive.analyze_image_bytes(data)
+                    except Exception as e:
+                        logger.warning(f"Hive Image Falló: {e}")
+                        return {"available": False}
+                
+                f_hive = pool.submit(run_hive)
+
+                nn_prob_legacy = f_neural.result()
+                hybrid_res = f_hybrid.result() # Ahora es un dict
                 metadata = f_metadata.result()
-                ela      = f_ela.result()
+                ela = f_ela.result()
+                hive_res = f_hive.result()
+
+            nn_prob, hybrid_pct = self._blend_neural_with_hybrid(
+                nn_prob_legacy,
+                hybrid_res,
+                self._threshold_cfg.hybrid_blend_weight,
+            )
 
             features    = self.extractor.extract(gray, img_cv)
             fingerprint = self.fingerprinter.analyze(gray, img_cv, features)
@@ -2293,6 +2438,25 @@ class NueroscanEngineV9:
                 features, nn_prob, metadata, ela, fingerprint
             )
             meta_prob_raw = prob   # guardar antes de que el ensamble lo sobreescriba
+
+            # ── [V10.3 Upgrade] Refuerzo Hive para Imágenes ──────────
+            hive_res = f_hive.result()
+            hive_prob = 0.0
+            if hive_res.get("available"):
+                hive_prob = hive_res.get("suspicion", 0.0) * 100
+                hive_suspect = hive_res.get("top_suspect", "unknown")
+                
+                # REPORTE EN CONSOLA (DEBUG)
+                print(f"   >>> [HIVE SCAN] Sospecha: {hive_prob:.1f}% | Generador: {hive_suspect}")
+                
+                if hive_prob > 60:
+                    # Nudge agresivo: Hive domina si detecta IA clara
+                    prob = max(prob, hive_prob * 0.9 + prob * 0.1)
+                    reasons.append(f"Confirmado por The Hive: Alta sospecha de {hive_suspect.upper()} ({hive_prob:.1f}%)")
+                    metadata["generator"] = metadata.get("generator") or f"Detectado por Hive ({hive_suspect})"
+                elif hive_prob > 40:
+                    prob = max(prob, (prob + hive_prob) / 2)
+                    reasons.append(f"Señal Hive: Patrón sospechoso de {hive_suspect.upper()} ({hive_prob:.1f}%)")
 
             # ── MEJORA 2: Clasificador Grok + Ensamble Ponderado ──────────
             grok_prob, grok_signals = GrokClassifier.classify(
@@ -2311,6 +2475,27 @@ class NueroscanEngineV9:
                 f"🔀 Ensamble [{blend_note}]: Meta={int(meta_prob_raw)}% · Grok={int(grok_prob)}% → {int(prob)}%"
             )
             reasons.extend(grok_signals)
+
+            if hybrid_res and self._threshold_cfg.hybrid_final_nudge_weight > 0:
+                h_w = max(0.0, min(1.0, float(self._threshold_cfg.hybrid_final_nudge_weight)))
+                h_pct = hybrid_res["prob_ai"] * 100.0
+                prob_before_hybrid_nudge = prob
+                
+                # Si la neurona confirma IA usando el umbral de calibración forense
+                if hybrid_res.get("is_ai"):
+                    # Nudge agresivo
+                    prob = (1.0 - h_w) * prob + h_w * h_pct
+                    reasons.append(
+                        f"Confirmado por firma neural forense (Hybrid-Core): "
+                        f"{int(prob_before_hybrid_nudge)}% → {int(prob)}%"
+                    )
+                elif hybrid_res["prob_ai"] <= float(self._threshold_cfg.hybrid_nudge_low_threshold):
+                    h_w_soft = h_w * 0.55
+                    prob = (1.0 - h_w_soft) * prob + h_w_soft * h_pct
+                    reasons.append(
+                        f"Híbrido tardío REAL (w={h_w_soft:.2f}, p={hybrid_res['prob_ai']:.2f}): "
+                        f"{int(prob_before_hybrid_nudge)}% → {int(prob)}%"
+                    )
 
             # Recalcular veredicto con probabilidad del ensamble (Estándar Pulzo)
             cfg = self.meta_classifier.cfg
@@ -2338,7 +2523,9 @@ class NueroscanEngineV9:
             # ── MEJORA 4: Log de predicción para calibración futura ────────
             logger.info(
                 f"PRED|hash={img_hash[:8]}|prob={prob:.1f}|verdict={verdict}|"
-                f"neural={nn_prob:.1f}|meta={meta_prob_raw:.1f}|grok={grok_prob:.1f}|"
+                f"neural={nn_prob:.1f}|neural_leg={nn_prob_legacy:.1f}|"
+                f"hybrid={hybrid_res['prob_ai'] if hybrid_res else 'na'}|"
+                f"meta={meta_prob_raw:.1f}|grok={grok_prob:.1f}|"
                 f"real_cam={metadata.get('confirmed_ai', False)}|"
                 f"meta_confirmed={metadata.get('real_camera', False)}"
             )
@@ -2365,6 +2552,13 @@ class NueroscanEngineV9:
                 },
                 "detalles": {
                     "neural":       round(nn_prob, 1),
+                    "neural_legacy": round(nn_prob_legacy, 1),
+                    "neural_hybrid_prob": round(hybrid_res["prob_ai"], 4) if hybrid_res else None,
+                    "neural_hybrid_pct": round(hybrid_pct, 1) if hybrid_pct is not None else None,
+                    "hybrid_blend_w": self._threshold_cfg.hybrid_blend_weight,
+                    "hybrid_final_nudge_w": self._threshold_cfg.hybrid_final_nudge_weight,
+                    "hybrid_nudge_high_thr": self._threshold_cfg.hybrid_nudge_high_threshold,
+                    "hybrid_nudge_low_thr": self._threshold_cfg.hybrid_nudge_low_threshold,
                     "meta_prob":    round(meta_prob_raw, 1),
                     "grok_prob":    round(grok_prob, 1),
                     "blend_note":   blend_note,
@@ -2442,6 +2636,13 @@ _engine: Optional[NueroscanEngineV9] = None
 _engine_lock = Lock()
 
 
+def reset_image_engine() -> None:
+    """Libera el singleton del motor de imagen (p. ej. para pruebas A/B con distinta config/env)."""
+    global _engine
+    with _engine_lock:
+        _engine = None
+
+
 def get_engine(config: Optional[ThresholdConfig] = None) -> NueroscanEngineV9:
     global _engine
     if _engine is None:
@@ -2454,3 +2655,4 @@ def get_engine(config: Optional[ThresholdConfig] = None) -> NueroscanEngineV9:
 def analyze_image(image_bytes: bytes, verbose: bool = False) -> Dict[str, Any]:
     """Helper wrapper compatible con el router V4.1."""
     return get_engine().process_image(image_bytes, verbose=verbose)
+                                                   

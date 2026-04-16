@@ -1,20 +1,23 @@
-"""
-MÓDULO: Audio Analyzer V4
-Análisis forense de audio para detección de voz sintética:
-  - Jitter y Shimmer (variación ciclo-a-ciclo de F0 y amplitud)
-  - HNR (Harmonics-to-Noise Ratio) — voz TTS tiene HNR demasiado alto
-  - Spectral Flatness Variance — voz real tiene flatness más variable
-  - Breathiness y creaky voice detection
-  - Onset irregularity (silencios TTS son perfectos)
-  - Deep-Sync (correlación fonema-visema de alta precisión)
-  - Detección de voz con Wav2Vec2 embeddings
-"""
-
+import logging
 import numpy as np
 import warnings
 import os
 import tempfile
+import subprocess
 from typing import List, Dict, Optional, Tuple
+import sys
+from pathlib import Path
+
+# Configurar logger para este módulo
+logger = logging.getLogger(__name__)
+
+# Importar el detector SOTA de audio
+try:
+    from models.audio_detector import analyze_audio
+except ImportError:
+    # Fallback si el path no está configurado
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+    from audio_detector import analyze_audio
 
 
 class AudioAnalyzer:
@@ -47,20 +50,49 @@ class AudioAnalyzer:
             print(">>> [AudioAnalyzer] librosa NO disponible — análisis de audio deshabilitado")
 
     def _load_audio(self, video_path: str, max_duration: float = 90.0) -> Tuple[Optional[np.ndarray], int]:
-        """Carga audio del video usando librosa."""
+        """Carga audio del video usando una extracción previa a WAV temporal."""
         if not self._librosa_available:
             return None, 0
+        
+        temp_wav = None
         try:
             import librosa
+            
+            # [FIX V10.3] Extraer audio a WAV usando ffmpeg para máxima compatibilidad
+            # Usamos un nombre de archivo limpio para evitar problemas en Windows
+            temp_wav = os.path.join(tempfile.gettempdir(), f"talos_audio_{os.getpid()}.wav")
+            
+            cmd = [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                temp_wav
+            ]
+            
+            # Ejecutar y capturar errores de subprocess
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.warning(f"ffmpeg falló (code {result.returncode}). Intentando carga directa.")
+                # Fallback: intentar cargar directamente si ffmpeg falla
+                y, sr = librosa.load(video_path, sr=16000, duration=max_duration, mono=True)
+                return y, sr
+            
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                y, sr = librosa.load(video_path, sr=16000, duration=max_duration, mono=True)
+                y, sr = librosa.load(temp_wav, sr=16000, duration=max_duration)
+            
             if len(y) < 1000:
                 return None, 0
             return y, sr
+            
         except Exception as e:
-            print(f">>> [AudioAnalyzer] Error cargando audio: {e}")
+            logger.error(f">>> [AudioAnalyzer] Error cargando audio: {e}")
             return None, 0
+        finally:
+            if temp_wav and os.path.exists(temp_wav):
+                try:
+                    os.remove(temp_wav)
+                except:
+                    pass
 
     # ------------------------------------------------------------------
     # Jitter, Shimmer, HNR via Parselmouth (Praat Python binding)
@@ -291,6 +323,93 @@ class AudioAnalyzer:
             return {"suspicion": 0.2, "error": str(e)}
 
     # ------------------------------------------------------------------
+    # Environment & Breathing Forensics (V9.0 Upgrade)
+    # ------------------------------------------------------------------
+    def _analyze_environment_noise(self, y: np.ndarray, sr: int) -> Dict:
+        """
+        Analiza si el ruido de fondo es coherente con un ambiente físico.
+        Los TTS tienen ruido inyectado (blanco/rosa) que es matemáticamente uniforme.
+        """
+        try:
+            import librosa
+            # 1. Extraer segmentos de "silencio"
+            S = np.abs(librosa.stft(y))
+            rms = librosa.feature.rms(S=S)[0]
+            # Umbral para detectar ruido de fondo puro (silencios entre palabras)
+            threshold = np.percentile(rms, 15)
+            noise_frames = S[:, rms < threshold]
+            
+            if noise_frames.shape[1] < 5:
+                # No hay suficiente silencio para evaluar ambiente
+                return {"coherence": 1.0, "suspicion": 0.2, "detail": "snr_too_high"}
+
+            # 2. Análisis de varianza espectral del ruido
+            # Ruido real físico varía por acústica; ruido digital es constante.
+            spectral_variance = float(np.var(np.mean(noise_frames, axis=0)))
+            # Entropía espectral del ruido
+            noise_flatness = float(np.mean(librosa.feature.spectral_flatness(S=noise_frames)))
+            
+            suspicion = 0.0
+            # Si la varianza del silencio es extremadamente baja (< 1e-7), es ruido inyectado.
+            if spectral_variance < 1e-7:
+                suspicion += 0.45 
+            elif spectral_variance < 1e-6:
+                suspicion += 0.20
+                
+            return {
+                "noise_spectral_variance": round(spectral_variance, 9),
+                "noise_flatness": round(noise_flatness, 4),
+                "suspicion": round(suspicion, 3)
+            }
+        except Exception:
+            return {"suspicion": 0.0}
+
+    def _detect_breathing_signatures(self, y: np.ndarray, sr: int) -> Dict:
+        """
+        Busca firmas de respiración humana (inhale/exhale) antes de hablar.
+        """
+        try:
+            import librosa
+            # Buscamos energía en la banda de 300Hz-3000Hz durante onsets iniciales
+            # La respiración es un ruido de banda ancha suave.
+            S = np.abs(librosa.stft(y))
+            rms = librosa.feature.rms(S=S)[0]
+            
+            # Buscamos transiciones silencio -> voz
+            threshold = np.mean(rms) * 0.2
+            is_voice = rms > threshold
+            
+            breaths_detected = 0
+            # Analizar el pre-enrollment de cada segmento de voz (200ms antes)
+            for i in range(1, len(is_voice)):
+                if is_voice[i] and not is_voice[i-1]:
+                    # Posible respiración antes de este frame
+                    pre_idx = max(0, i-6) # ~200ms antes a 30fps spectral
+                    pre_segment = S[:, pre_idx:i]
+                    if pre_segment.shape[1] > 2:
+                        # La respiración tiene un ratio de energía HF/LF específico
+                        energy_ratio = np.mean(pre_segment[20:100, :]) / (np.mean(pre_segment[:20, :]) + 1e-8)
+                        if 0.1 < energy_ratio < 0.8:
+                            breaths_detected += 1
+            
+            # Si el audio dura > 10s y no hay ni una respiración detectable
+            # ElevenLabs rara vez simula la entrada de aire.
+            duration = len(y) / sr
+            suspicion = 0.0
+            if duration > 8.0 and breaths_detected == 0:
+                suspicion = 0.40
+            elif duration > 15.0 and breaths_detected < 2:
+                suspicion = 0.25
+                
+            return {
+                "breaths_detected": breaths_detected,
+                "breath_frequency_ratio": round(duration / (breaths_detected + 1), 2),
+                "suspicion": suspicion
+            }
+        except Exception:
+            return {"suspicion": 0.0}
+
+    # ------------------------------------------------------------------
     # Lip Sync Detection
     # ------------------------------------------------------------------
     def _analyze_lip_sync(self, y: np.ndarray, sr: int, mouth_aperture_seq: List[float]) -> Dict:
@@ -436,44 +555,79 @@ class AudioAnalyzer:
                 "detail": "sin_audio_o_muy_corto"
             }
 
-        # Ejecutar análisis
+        # ── Análisis SOTA (PROD-2026 / SynthID) ──
+        # Ejecutamos esto SIEMPRE, incluso si no hay voz humana clara.
+        try:
+            # [OPT V8.4] Pasar path directamente para evitar cargar video gigante en RAM 
+            # y aplicar límite de duración interna para prevenir timeouts.
+            sota_res = analyze_audio(video_path, duration=60.0)
+        except Exception as e:
+            print(f">>> [AudioAnalyzer] Error en motor SOTA: {e}")
+            sota_res = {"probabilidad": 0, "detalles": {"metricas_avanzadas": {}}}
+
+        # Ejecutar análisis prosódico/forense base
         if self._parselmouth_available:
             prosody_result = self._analyze_prosody_parselmouth(y, sr)
         else:
             prosody_result = self._analyze_prosody_librosa(y, sr)
 
         naturalness_result = self._analyze_naturalness_markers(y, sr)
+        environment_result = self._analyze_environment_noise(y, sr)
+        breathing_result   = self._detect_breathing_signatures(y, sr)
 
         lip_sync_result = {"suspicion": 0.2, "available": False}
         if mouth_aperture_seq:
             lip_sync_result = self._analyze_lip_sync(y, sr, mouth_aperture_seq)
             
-        # Si la prosodia indicó que NO hay voz (Ej. Sora con sonido ambiental/silencio),
-        # apagar por completo el módulo de audio para no aplastar como "orgánico"
-        # el score general que provenga de ViT/Temporal.
-        if prosody_result.get("available", True) is False:
+        # Si no hay voz humana (prosody_result unavailable), 
+        # pero detectamos SynthID, el módulo debe estar disponible.
+        synth_score_str = sota_res.get("detalles", {}).get("metricas_avanzadas", {}).get("synthid_watermark", "0.0%")
+        synth_val = float(synth_score_str.replace("%", ""))
+        has_synth = synth_val > 50
+
+        if prosody_result.get("available", True) is False and not has_synth:
             return {
                 "suspicion": 0.5,
                 "available": False,
-                "detail": "ausencia_de_voz_valida"
+                "detail": "ausencia_de_voz_valida_y_sin_synthid"
             }
 
         # Aggregación
         sub_suspicions = {
-            "prosody":    prosody_result["suspicion"],
-            "naturalness": naturalness_result["suspicion"],
-            "lip_sync":   lip_sync_result["suspicion"]
+            "prosody":    prosody_result.get("suspicion", 0.5),
+            "naturalness": naturalness_result.get("suspicion", 0.5),
+            "lip_sync":   lip_sync_result.get("suspicion", 0.5),
+            "sota_synth": sota_res.get("probabilidad", 0) / 100.0
         }
 
-        weights = {"prosody": 0.50, "naturalness": 0.30, "lip_sync": 0.20}
+        weights = {
+            "prosody": 0.05, 
+            "naturalness": 0.05,
+            "environment": 0.15,  # Nueva señal de peso relevante
+            "breathing": 0.15,    # Nueva señal de peso relevante
+            "lip_sync": 0.10,
+            "sota_synth": 0.50 
+        }
+        
+        # Consolidar sospechas
+        sub_suspicions["environment"] = environment_result.get("suspicion", 0.0)
+        sub_suspicions["breathing"] = breathing_result.get("suspicion", 0.0)
+        
         total = sum(sub_suspicions[k] * weights[k] for k in sub_suspicions)
+
+        # Hard Override: si SOTA detectó SynthID con alta confianza, forzar sospecha muy alta
+        if synth_val > 70:
+            total = max(total, 0.98)
 
         return {
             "suspicion":            round(min(1.0, total), 3),
             "suspicion_components": sub_suspicions,
             "prosody":              prosody_result,
             "naturalness":          naturalness_result,
+            "environment":          environment_result,
+            "breathing":            breathing_result,
             "lip_sync":             lip_sync_result,
+            "sota_info":            sota_res,
             "audio_duration_s":     round(len(y) / sr, 1),
             "sample_rate":          sr,
             "available":            True

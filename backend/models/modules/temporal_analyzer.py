@@ -473,6 +473,7 @@ class TemporalAnalyzer:
         # Agregar métricas de flujo
         div_mean   = float(np.mean([m["divergence_mean"]   for m in flow_field_metrics]))
         curl_mean  = float(np.mean([m["curl_mean"]         for m in flow_field_metrics]))
+        mag_mean   = float(np.mean([m["magnitude_mean"]    for m in flow_field_metrics]))
         naturalness= float(np.mean([m["field_naturalness"] for m in flow_field_metrics]))
         jac_score  = float(np.mean(jacobian_scores))
 
@@ -509,16 +510,28 @@ class TemporalAnalyzer:
             "texture":      0.20
         }
 
+        # ----------------------------------------------------
+        # OPCIÓN 2: Escalamiento Suave Temporal (Jacobiano Ponderado)
+        # ----------------------------------------------------
+        # El Jacobiano detecta discontinuidades físicas, pero la compresión H.264
+        # en videos estáticos genera ruido que el detector confunde con IA.
+        # Escalamos la importancia del Jacobiano según el movimiento real (mag_mean).
+        # Si no hay movimiento, el Jacobiano casi no tiene peso.
+        
+        # mag_mean suele estar entre 0 (estático) y 50 (acción rápida).
+        # Usamos un factor de escala suave: si mag_mean < 5.0, el peso se reduce proporcionalmente.
+        jac_modifier = min(1.0, mag_mean / 5.0)
+        suspicion_components["jacobian"] *= jac_modifier
+        
         total_suspicion = sum(
             suspicion_components[k] * weights[k]
             for k in suspicion_components
         )
 
         # Penalización extrema para Generación de Video (Sora/Runway)
-        # La IA es exageradamente perfecta y suave. Un video orgánico (cámara en mano natural)
-        # tiene un caos microscópico de al menos div > 0.25.
-        if div_mean < 0.25:
-            smooth_penalty = min(1.0, (0.25 - div_mean) * 8.0)
+        # Solo penar si el video es "demasiado suave" habiendo movimiento.
+        if div_mean < 0.25 and mag_mean > 2.0:
+            smooth_penalty = min(1.0, (0.25 - div_mean) * 5.0)
             total_suspicion = max(total_suspicion, smooth_penalty)
 
         return {

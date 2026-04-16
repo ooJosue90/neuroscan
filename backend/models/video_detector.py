@@ -52,6 +52,7 @@ from modules.forensic_analyzer import ForensicAnalyzer
 from modules.audio_analyzer    import AudioAnalyzer
 from modules.vit_ensemble      import ViTEnsembleClassifier
 from modules.scorer            import CalibratedEnsembleScorer
+from modules.hive_analyzer     import HiveAnalyzer
 
 # ── Logging de librería — NO configura el root logger ─────────────────────────
 # [BUG-5 FIX] Las librerías no deben llamar logging.basicConfig().
@@ -98,6 +99,7 @@ class PipelineConfig:
     timeout_forensic:   float = 90.0
     timeout_audio:      float = 90.0
     timeout_vit:        float = 90.0
+    timeout_hive:       float = 120.0
 
     # Módulos habilitados
     enable_temporal:    bool  = True
@@ -105,6 +107,7 @@ class PipelineConfig:
     enable_forensic:    bool  = True
     enable_audio:       bool  = True
     enable_vit:         bool  = True
+    enable_hive:        bool  = True
 
     # Control de carga  [PRD-2]
     max_concurrent:     int   = 4   # máximo análisis simultáneos
@@ -164,12 +167,13 @@ class VideoIADetectorV5:
         self.forensic_analyzer  = _safe_init("forensic",  ForensicAnalyzer) if cfg.enable_forensic else None
         self.audio_analyzer     = _safe_init("audio",     AudioAnalyzer) if cfg.enable_audio else None
         self.vit_classifier     = _safe_init("vit",       lambda: ViTEnsembleClassifier(device_id=device_id)) if cfg.enable_vit else None
+        self.hive_analyzer      = _safe_init("hive",      HiveAnalyzer) if cfg.enable_hive else None
         self.scorer             = CalibratedEnsembleScorer()
 
         active = [n for n, obj in [
             ("temporal", self.temporal_analyzer), ("facial", self.facial_analyzer),
             ("forensic", self.forensic_analyzer), ("audio", self.audio_analyzer),
-            ("vit", self.vit_classifier),
+            ("vit", self.vit_classifier), ("hive", self.hive_analyzer),
         ] if obj is not None]
         logger.info(
             "Pipeline listo — GPU=%s BATCH=%d módulos_activos=%s",
@@ -188,6 +192,7 @@ class VideoIADetectorV5:
             "forensic":  self.forensic_analyzer is not None,
             "audio":     self.audio_analyzer    is not None,
             "vit":       self.vit_classifier    is not None,
+            "hive":      self.hive_analyzer     is not None,
             "scorer":    self.scorer            is not None,
         }
         active_count = sum(modules_ok.values())
@@ -554,6 +559,11 @@ class VideoIADetectorV5:
                         return self.vit_classifier.analyze(frames_bgr)
                     return {"suspicion": 0.5, "available": False}
 
+                def run_hive():
+                    if hasattr(self, 'hive_analyzer') and self.hive_analyzer and cfg.enable_hive:
+                        return self.hive_analyzer.analyze(video_path)
+                    return {"suspicion": 0.5, "available": False}
+
                 cfg = self.config
                 all_tasks: Dict[str, Tuple[Callable, float]] = {
                     "temporal":     (run_temporal,  cfg.timeout_temporal),
@@ -561,6 +571,7 @@ class VideoIADetectorV5:
                     "forensic":     (run_forensic,  cfg.timeout_forensic),
                     "audio":        (run_audio,     cfg.timeout_audio),
                     "vit_ensemble": (run_vit,       cfg.timeout_vit),
+                    "hive":         (run_hive,      cfg.timeout_hive),
                 }
 
                 module_results: Dict[str, Any] = {}
@@ -607,6 +618,14 @@ class VideoIADetectorV5:
 
                 score_result = self.scorer.score(module_results)
 
+                # 6. Integración de resultados de The Hive (V10 Upgrade)
+                hive_res = module_results.get("hive", {})
+                hive_prob = 0.0
+                hive_suspect = "N/A"
+                if hive_res.get("available"):
+                    hive_prob = hive_res.get("suspicion", 0.0) * 100
+                    hive_suspect = hive_res.get("top_suspect", "unknown")
+                    
                 forensic_report = {
                     "flow_divergence":        _g(module_results["temporal"], "flow_divergence_mean"),
                     "jacobian_discontinuity": _g(module_results["temporal"], "jacobian_discontinuity"),
@@ -622,10 +641,14 @@ class VideoIADetectorV5:
                     "shot_noise_ratio":       _g(module_results["forensic"], "noise_signature", "shot_noise_ratio"),
                     "audio_jitter":           _g(module_results["audio"], "prosody", "jitter"),
                     "audio_hnr_db":           _g(module_results["audio"], "prosody", "hnr_db"),
+                    "audio_noise_variance":   _g(module_results["audio"], "environment", "noise_spectral_variance"),
+                    "audio_breaths":          _g(module_results["audio"], "breathing", "breaths_detected"),
                     "lip_sync_corr":          _g(module_results["audio"], "lip_sync", "lip_sync_correlation"),
                     "vit_frame_mean":         _g(module_results["vit_ensemble"], "frame_level", "mean"),
                     "vit_frame_p90":          _g(module_results["vit_ensemble"], "frame_level", "p90"),
                     "videomae_score":         _g(module_results["vit_ensemble"], "videomae_score"),
+                    "hive_ai_prob":           hive_prob,
+                    "hive_suspect":           hive_suspect
                 }
                 forensic_report = {
                     k: round(float(v), 4) if isinstance(v, (int, float)) else v
@@ -633,33 +656,53 @@ class VideoIADetectorV5:
                 }
 
                 prob = score_result["probability"]
-                temp_data = module_results.get("temporal", {})
-                jacob = temp_data.get("jacobian_discontinuity", 0.0)
-                bitrate = video_meta.get("bitrate", 2000000)
+                
+                # Definir variables locales para refuerzos a partir del reporte forense
+                # [FIX V10.3] Extraer de forensic_report para evitar NameError
+                jacob = forensic_report.get("jacobian_discontinuity", 0.0)
                 vit_mean = forensic_report.get("vit_frame_mean", 0.0)
                 vit_p90 = forensic_report.get("vit_frame_p90", 0.0)
                 blinks = forensic_report.get("blinks_per_min", 0.0)
                 facial_s = score_result.get("module_scores", {}).get("facial", 0.0)
-                noise_std = forensic_report.get("noise_std", 10.0)
-                sota_notes = []
+
+                # Refuerzo con señal de The Hive
+                if hive_prob > 80:
+                    prob = max(prob, hive_prob * 0.95)
+                    sota_notes = [f"Refuerzo Hive: Alta sospecha de {hive_suspect.upper()}"]
+                elif hive_prob > 50:
+                    prob = max(prob, (prob + hive_prob) / 2)
+                    sota_notes = [f"Señal Hive: Detectado patrón de {hive_suspect.upper()}"]
+                else:
+                    sota_notes = []
                 
+                # Refuerzos para videos IA - V9.2 (balance óptimo)
                 if blinks > 85:
                     prob = max(prob, 96.0)
-                    sota_notes.append("Refuerzo V8: Incoherencia estructural extrema (Synthetic Pareidolia)")
-                elif facial_s < 15 and vit_mean > 0.92 and vit_p90 > 0.94:
-                    prob = max(prob, 92.0)
-                    sota_notes.append("Refuerzo V8: Confianza neuronal confirmada (Non-human Subject)")
-                elif facial_s < 15 and vit_p90 > 0.70 and noise_std < 2.5:
+                    sota_notes.append("Refuerzo V8: Incoherencia estructural extrema")
+                
+                # Señal fuerte: vit_p90 muy alto + facial bajo (no hay rostro humano claro)
+                if facial_s < 15 and vit_mean > 0.75 and vit_p90 > 0.85:
                     prob = max(prob, 93.0)
-                    sota_notes.append("Refuerzo V8: Firma ElevenLabs/Sora T2V detectada (High Fidelity)")
-                    # [FIX V10.3-STABILITY] Calibrado: no rescatar si sospecha neural o temporal es dominante.
-                    # IA High-Fid (ia 8) tiene vit_mean > 0.90, REAL High-Fid suele estar < 0.75.
-                    if jacob < 0.40 and vit_mean < 0.78 and score_result.get("module_scores", {}).get("temporal", 0.0) < 65:
-                        prob = prob * 0.40
-                        sota_notes.append("Rescate SOTA V7: Integridad cinemática verificada")
+                    sota_notes.append("Refuerzo V9: Confianza neuronal alta sin rostro claro")
+                
+                # Señal media: vit medio-alto + jacobian alto
+                if jacob > 0.45 and vit_mean > 0.70:
+                    prob = max(prob, 88.0)
+                    sota_notes.append("Refuerzo V9: Incoherencia física + señal neuronal")
+                
+                # Señal específica: facial asymmetry muy baja (deepfake clássico)
+                if facial_s < 25 and forensic_report.get("facial_asymmetry_std", 0.1) < 0.015 and vit_mean > 0.72:
+                    prob = max(prob, 90.0)
+                    sota_notes.append("Refuerzo V9: Simetría facial anómala")
+
+                # Rescate para videos REALES con alta calidad cinemática
+                if jacob < 0.30 and vit_mean > 0.75 and prob < 80:
+                    prob = prob * 0.35
+                    sota_notes.append("Rescate V9: Alta calidad cinemática")
+                
                 if jacob > 0.65:
                     prob = max(prob, 94.0)
-                    sota_notes.append("Refuerzo SOTA V7: Incoherencia física extrema (Signature T2V)")
+                    sota_notes.append("Refuerzo SOTA V7: Incoherencia física extrema")
 
                 audio_data_res = module_results.get("audio", {})
                 if isinstance(audio_data_res, dict):
@@ -678,6 +721,10 @@ class VideoIADetectorV5:
                 score_result["verdict"] = "IA" if prob >= 50 else "REAL"
 
                 t_elapsed = round(time.monotonic() - t_start, 2)
+                audio_nota = audio_data_res.get("sota_info", {}).get("nota", "")
+                if audio_nota:
+                    sota_notes.append(audio_nota)
+
                 reasons = sota_notes + (score_result.get("reasons") or ["Análisis completado"])
                 module_latencies = {k: round(v.get("_latency_s", 0), 3) for k, v in module_results.items() if isinstance(v, dict)}
 
