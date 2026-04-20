@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+torch
+transformers
+numpy
+opencv-python
+Pillow
+httpx
+open_clip_py
+scipy
+scikit-learn
+python-dotenv
+yt-dlp
+curl-cffi
