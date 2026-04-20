@@ -29,11 +29,15 @@ HERENCIA DE V6:
 """
 
 from __future__ import annotations
+import base64
+# [V10.3] Importación de Hive
+from models.modules.hive_analyzer import HiveAnalyzer
 
 import io
 import logging
 import os
 import struct
+import subprocess
 import tempfile
 import warnings
 from dataclasses import dataclass, field
@@ -115,6 +119,10 @@ WEIGHT_EXPERT_MAX     = 0.25   # [FIX-V8-3] Subido de 15→25: experto necesita 
 
 # SNR físicamente imposible en grabación real (ElevenLabs/TTS: 60-80dB, estudio humano máx: 55dB)
 SNR_IMPOSSIBLE_THRESH = 60.0   # [NEW-V8] Hard override: SNR>60dB → físicamente no puede ser grabación real
+
+# [V10.3] Configuración de Hive AI
+ENABLE_HIVE           = True
+TIMEOUT_HIVE          = 35.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Singletons
@@ -552,6 +560,7 @@ class AcousticFeatures:
     exoneration_count: int = 0
     reasons: list = field(default_factory=list)
     confidence_interval: tuple = (0.0, 0.0)
+    hive_score: float = 0.0
 
 
 @dataclass
@@ -595,6 +604,7 @@ class AnalysisResult:
                     "concat_ratio": f"{f.concat_ratio:.4f}",
                     "clipping": f"{f.clipping_ratio * 100:.1f}%",
                     "synthid_watermark": f"{f.synthid_score * 100:.1f}%",
+                    "hive_detection": f"{f.hive_score:.1f}%",
                 }
             }
         }
@@ -611,6 +621,7 @@ def analyze_audio(data: Any, duration: float = MAX_ANALYSIS_DURATION) -> dict:
         # ── 0. Preparar path del archivo ─────────────────────────────────────
         if isinstance(data, (str, Path)):
             tmp_path = str(data)
+            ext = Path(tmp_path).suffix.lower() or ".wav"
         else:
             is_temp = True
             ext = _detect_audio_extension(data)     # [FIX-4]
@@ -658,6 +669,46 @@ def analyze_audio(data: Any, duration: float = MAX_ANALYSIS_DURATION) -> dict:
         p_2025 = _infer_chunked(pipe_2025, y_16k, sr_16k, _label_fake_2025)
 
         logger.info("Scores brutos — Base: %.1f%% | SOTA: %.1f%%", p_base, p_2025)
+
+        # ── 5.5 Integración Hive para Audio (V10.3 Upgrade) ─────────────────
+        hive_prob = 0.0
+        hive_suspect = "unknown"
+        hive_available = False
+        if ENABLE_HIVE:
+            hive_tmp = None
+            try:
+                # [FIX V10.3] Ahorro de Créditos: Extraer solo 10s (suficiente para la firma forense de Hive)
+                hive_tmp = os.path.join(tempfile.gettempdir(), f"hive_audio_{os.getpid()}.mp3")
+                
+                # Tomar 10 segundos tras un pequeño offset inicial
+                start_offset = "00:00:03"
+                cmd = [
+                    "ffmpeg", "-y", "-ss", start_offset, "-i", tmp_path,
+                    "-t", "10", "-vn", "-acodec", "libmp3lame", "-ab", "96k",
+                    hive_tmp
+                ]
+                
+                # Ejecución silenciosa
+                subprocess.run(cmd, capture_output=True, check=False)
+                
+                if os.path.exists(hive_tmp) and os.path.getsize(hive_tmp) > 1000:
+                    with open(hive_tmp, "rb") as f:
+                        audio_bytes = f.read()
+                    
+                    hive = HiveAnalyzer()
+                    hive_res = hive.analyze_audio_bytes(audio_bytes, mime_type="audio/mpeg")
+                    
+                    if hive_res.get("available"):
+                        hive_prob = hive_res.get("suspicion", 0.0) * 100
+                        hive_suspect = hive_res.get("top_suspect", "unknown")
+                        hive_available = True
+                        logger.info(">>> [HIVE AUDIO SCAN] Sospecha: %.1f%% | Generador: %s", hive_prob, hive_suspect)
+            except Exception as e:
+                logger.warning("Fallo en escaneo Hive Audio (Clip): %s", e)
+            finally:
+                if hive_tmp and os.path.exists(hive_tmp):
+                    try: os.remove(hive_tmp)
+                    except: pass
 
         # ── 6. Extracción de métricas forenses posterioes ────────────────────
         # Usar y_16k para métricas estándar y y_high para SynthID
@@ -868,6 +919,17 @@ def analyze_audio(data: Any, duration: float = MAX_ANALYSIS_DURATION) -> dict:
             logger.info("Override V8.4-B: LFCC=%.3f, Base=%.1f%%, SOTA=%.1f%% → prob=%.1f%%",
                         lfcc_var, p_base, p_2025, prob_final)
 
+        # [NEW-V10.3] Refuerzo Hive para Audio
+        if hive_available:
+            if hive_prob > 75:
+                # Refuerzo agresivo si Hive está muy seguro
+                prob_final = max(prob_final, hive_prob * 0.92 + prob_final * 0.08)
+                reasons.append(f"\u2726 Confirmado por The Hive: Alta sospecha de {hive_suspect.upper()} ({hive_prob:.1f}%)")
+            elif hive_prob > 45:
+                # Refuerzo moderado por promedio
+                prob_final = max(prob_final, (prob_final + hive_prob) / 2)
+                reasons.append(f"\u25b3 Senal Hive: Patron sospechoso de {hive_suspect.upper()} ({hive_prob:.1f}%)")
+
         n_evidence = sum(1 for r in reasons if r.startswith("\u2726"))
         n_exon     = sum(1 for r in reasons if r.startswith("\u2296"))
 
@@ -906,6 +968,7 @@ def analyze_audio(data: Any, duration: float = MAX_ANALYSIS_DURATION) -> dict:
             exoneration_count = n_exon,
             reasons           = reasons,
             confidence_interval = ci,
+            hive_score        = hive_prob,
         )
 
         result = AnalysisResult(

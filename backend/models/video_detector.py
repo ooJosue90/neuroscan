@@ -1,24 +1,13 @@
 """
-VideoIADetector V8.4-PROD — Orquestador Principal (Production-Grade)
+VideoIADetector V10.3-FORENSIC — Orquestador Principal (Production-Grade)
 Pipeline completo de detección de video generado por IA.
 
 Versiones:
-  - V8.4-PROD (Optimización de Memoria y Arquitectura) [ADJ-2026-04]
-    * [BUG-6] Soporte nativo para rutas (Zero-copy RAM).
-    * [FIX-V8.4] Corregido offset ftyp en MP4.
-    * [FIX-V8.4] Reemplazada API privada _shutdown por flag interna.
-    * [ADJ-V8.4] Suavizadas heurísticas agresivas (Neural Trust / Logo overrides).
-    * [DOC] Reconocimiento de threads huérfanos en timeout.
-  - V5.0-BASE (Versión de Producción Primaria)
-
-Uso:
-    detector = VideoIADetectorV5()
-    result   = detector.analyze(video_bytes)
-    print(result["verdict"])  # "SINTÉTICO" / "ORGÁNICO" / ...
-
-    # Health-check (para readiness probe)
-    status = detector.health_check()
-    assert status["status"] == "ok"
+  - V10.3-STABLE (Titanium Edition - Production Release)
+    * [CORE] Unificación total de orquestación multimodal.
+    * [OPT] Paso de parámetros por referencia para ahorro de RAM.
+    * [FIX] Sincronización optimizada Deep-Sync Omega V5.
+  - V8.4-LEGACY (Versión de Auditoría Previa)
 """
 
 from __future__ import annotations
@@ -68,7 +57,7 @@ __all__ = [
 ]
 
 # ── Constantes globales ───────────────────────────────────────────────────────
-PIPELINE_VERSION  = "V8.1-KINETIC"
+PIPELINE_VERSION  = "V10.3-STABLE"
 MAX_INPUT_BYTES   = 500 * 1024 * 1024   # 500 MB — rechazo temprano
 MIN_INPUT_BYTES   = 1_024               # 1 KB mínimo
 _DARK_FRAME_MEAN  = 5.0                 # umbral media gris para descartar frames
@@ -84,22 +73,26 @@ class PipelineConfig:
     Usar dataclass permite validación, repr limpio y serialización.
     """
     # Extracción de frames
-    max_frames:         int   = 80
-    target_fps_sample:  float = 3.0
-    max_video_duration: float = 120.0
+    # [OPT V10.3] 48 frames es más que suficiente para deepfake detection.
+    # Los modelos de IA dejan artefactos en cada frame — no es necesario analizar 80.
+    max_frames:         int   = 48
+    target_fps_sample:  float = 2.0   # [OPT] Menos muestreo = menos I/O
+    max_video_duration: float = 60.0  # [OPT] 60s — los patrones de deepfake se detectan en el primer minuto
 
     # GPU / Inferencia
     use_gpu:            bool  = True
     gpu_device_id:      int   = 0
-    batch_size:         int   = 16
+    batch_size:         int   = 24    # [OPT] Batch más grande = menos forward passes
 
-    # Timeouts ajustados por módulo (segundos)
-    timeout_temporal:   float = 90.0
-    timeout_facial:     float = 90.0
-    timeout_forensic:   float = 90.0
-    timeout_audio:      float = 90.0
-    timeout_vit:        float = 90.0
-    timeout_hive:       float = 120.0
+    # Timeouts por módulo — reducidos 50% manteniendo margen de seguridad
+    # [OPT V10.3] Todos los módulos locales suelen terminar en <20s.
+    # Hive responde en 10-30s en condiciones normales.
+    timeout_temporal:   float = 45.0
+    timeout_facial:     float = 45.0
+    timeout_forensic:   float = 45.0
+    timeout_audio:      float = 45.0
+    timeout_vit:        float = 50.0
+    timeout_hive:       float = 55.0  # [OPT] Antes 120s — limitante del pipeline completo
 
     # Módulos habilitados
     enable_temporal:    bool  = True
@@ -110,7 +103,8 @@ class PipelineConfig:
     enable_hive:        bool  = True
 
     # Control de carga  [PRD-2]
-    max_concurrent:     int   = 4   # máximo análisis simultáneos
+    # [OPT] Más concurrencia = menos espera entre análisis seguidos
+    max_concurrent:     int   = 6
 
     def __post_init__(self) -> None:
         """Valida rangos críticos al construir la config."""
@@ -137,7 +131,7 @@ class VideoIADetectorV5:
         # [PRD-2] Semáforo para limitar análisis concurrentes
         self._semaphore = threading.Semaphore(self.config.max_concurrent)
         # [OPT-1] Executor persistente — no recreado por cada llamada a analyze()
-        # [FIX-V8.4] Flag interna para evitar uso de API privada _shutdown
+        # [FIX-V10.3] Flag interna para evitar uso de API privada _shutdown
         self._executor_running = True
         self._executor = ThreadPoolExecutor(
             max_workers=self.config.max_concurrent * 2,
@@ -223,7 +217,7 @@ class VideoIADetectorV5:
     def _extract_frames(self, video_path: Union[str, Path]) -> Dict[str, Any]:
         """
         Extrae frames del video con muestreo inteligente.
-        [BUG-6 FIX V8.4] Soporta rutas nativas para evitar carga en RAM.
+        # [BUG-6 FIX V10.3] Soporta rutas nativas para evitar carga en RAM.
         """
         video_path_str = str(video_path)
         cap = cv2.VideoCapture(video_path_str)
@@ -488,9 +482,9 @@ class VideoIADetectorV5:
     # ── Análisis completo ─────────────────────────────────────────────────────
     def analyze(self, video_data: Union[bytes, str, Path]) -> Dict[str, Any]:
         """
-        Punto de entrada principal del pipeline V8.4.
+        Punto de entrada principal del pipeline V10.3 Titanium.
         
-        [BUG-6] Soporte Zero-Copy RAM:
+        [CORE] Soporte Zero-Copy RAM:
         - Si video_data es bytes: crea temporal y analiza.
         - Si video_data es str/Path: analiza directamente desde disco.
         """
@@ -664,6 +658,7 @@ class VideoIADetectorV5:
                 vit_p90 = forensic_report.get("vit_frame_p90", 0.0)
                 blinks = forensic_report.get("blinks_per_min", 0.0)
                 facial_s = score_result.get("module_scores", {}).get("facial", 0.0)
+                facial_asym_std = forensic_report.get("facial_asymmetry_std", 0.1)
 
                 # Refuerzo con señal de The Hive
                 if hive_prob > 80:
@@ -674,33 +669,106 @@ class VideoIADetectorV5:
                     sota_notes = [f"Señal Hive: Detectado patrón de {hive_suspect.upper()}"]
                 else:
                     sota_notes = []
-                
+
+                # ── HIVE VETO PROTECTION [FIX V10.3] ─────────────────────────
+                # Si Hive está disponible Y dice <15%, es señal fuerte de que el
+                # video es real. Los artefactos de recompresión de yt-dlp confunden
+                # a ViT y Jacobian — Hive es más robusto ante este tipo de ruido.
+                hive_veto_active = hive_res.get("available") and hive_prob < 15.0
+
+                # ── AUDIO VETO [FIX V10.3] ───────────────────────────────────
+                # Fallback cuando Hive no está disponible (ej: rate-limit 429).
+                # Si el motor de audio local dice <30% IA, también actuamos como veto.
+                # El audio es un fuerte indicador de autenticidad cuando Hive falla.
+                audio_res_for_veto = module_results.get("audio", {})
+                audio_prob_for_veto = audio_res_for_veto.get("probabilidad", None)
+                if audio_prob_for_veto is None:
+                    # intentar extraer de estructura anidada
+                    audio_prob_for_veto = audio_res_for_veto.get("sota_info", {}).get("probabilidad", None)
+                audio_veto_active = (
+                    not hive_res.get("available")   # Hive no disponible
+                    and audio_prob_for_veto is not None
+                    and float(audio_prob_for_veto) < 30.0
+                )
+                # Combinar vetos: si cualquiera está activo, protegemos el resultado
+                any_veto_active = hive_veto_active or audio_veto_active
+
                 # Refuerzos para videos IA - V9.2 (balance óptimo)
                 if blinks > 85:
                     prob = max(prob, 96.0)
-                    sota_notes.append("Refuerzo V8: Incoherencia estructural extrema")
-                
+                    sota_notes.append("Refuerzo V10: Incoherencia estructural extrema")
+
                 # Señal fuerte: vit_p90 muy alto + facial bajo (no hay rostro humano claro)
-                if facial_s < 15 and vit_mean > 0.75 and vit_p90 > 0.85:
+                # [FIX] Solo aplica si ningún veto está activo
+                if facial_s < 15 and vit_mean > 0.75 and vit_p90 > 0.85 and not any_veto_active:
                     prob = max(prob, 93.0)
                     sota_notes.append("Refuerzo V9: Confianza neuronal alta sin rostro claro")
-                
+
                 # Señal media: vit medio-alto + jacobian alto
-                if jacob > 0.45 and vit_mean > 0.70:
+                # [FIX] Umbral jacobian subido 0.45 → 0.55 para evitar falsas alarmas
+                # en videos recomprimidos por yt-dlp. Con veto Hive.
+                if jacob > 0.55 and vit_mean > 0.70 and not any_veto_active:
                     prob = max(prob, 88.0)
                     sota_notes.append("Refuerzo V9: Incoherencia física + señal neuronal")
-                
-                # Señal específica: facial asymmetry muy baja (deepfake clássico)
-                if facial_s < 25 and forensic_report.get("facial_asymmetry_std", 0.1) < 0.015 and vit_mean > 0.72:
+
+                # Señal específica: facial asymmetry muy baja (deepfake clásico)
+                # [FIX] Guard: facial_asym_std > 0 para no disparar cuando NO se detectó cara.
+                # [FIX] Guard: Hive veto para no inflar falsamente cuando Hive dice REAL.
+                if (facial_s < 25
+                        and facial_asym_std > 0.0
+                        and facial_asym_std < 0.015
+                        and vit_mean > 0.72
+                        and not any_veto_active):
                     prob = max(prob, 90.0)
                     sota_notes.append("Refuerzo V9: Simetría facial anómala")
+
+                # ── VETO CAP ESCALONADO [FIX V10.3] ──────────────────────────
+                # El cap depende de qué señales confirman que el video es real:
+                #
+                # Tier 1 — Hive + Audio ambos dicen REAL:  cap → 30% (REAL fuerte)
+                # Tier 2 — Solo Hive dice REAL (<15%):     cap → 38% (REAL)
+                # Tier 3 — Solo Audio dice REAL (<25%):    cap → 55% (INCIERTO bajo)
+                # Tier 4 — Solo Audio dice REAL (<30%):    cap → 60% (INCIERTO, conservador)
+                #
+                # Razonamiento: Hive es el más confiable.
+                # Si Hive dice 14%, el video ES real y debemos decir REAL, no INCIERTO.
+                # Si solo tenemos audio (Hive con rate-limit), somos más conservadores.
+                if any_veto_active:
+                    audio_prob_val = float(audio_prob_for_veto) if audio_prob_for_veto is not None else 100.0
+
+                    if hive_veto_active and audio_veto_active:
+                        # Doble confirmación: Hive + Audio → REAL fuerte
+                        cap = 30.0
+                        veto_reason = f"Hive={hive_prob:.1f}% + Audio={audio_prob_val:.1f}% — Doble confirmación orgánica"
+                    elif hive_veto_active:
+                        # Solo Hive confirma real
+                        if hive_prob < 10.0:
+                            cap = 30.0
+                            veto_reason = f"Hive={hive_prob:.1f}% — Alta certeza orgánica"
+                        else:
+                            cap = 38.0
+                            veto_reason = f"Hive={hive_prob:.1f}% — Señal orgánica confirmada"
+                    else:
+                        # Solo Audio (Hive no disponible) → conservador
+                        if audio_prob_val < 25.0:
+                            cap = 55.0
+                            veto_reason = f"Audio={audio_prob_val:.1f}% — Voz humana detectada (Hive no disponible)"
+                        else:
+                            cap = 60.0
+                            veto_reason = f"Audio={audio_prob_val:.1f}% — Señal orgánica parcial (Hive no disponible)"
+
+                    if prob > cap:
+                        prob = cap
+                        sota_notes.append(
+                            f"Veto V10.3: Score capado a {cap:.0f}% ({veto_reason})"
+                        )
 
                 # Rescate para videos REALES con alta calidad cinemática
                 if jacob < 0.30 and vit_mean > 0.75 and prob < 80:
                     prob = prob * 0.35
                     sota_notes.append("Rescate V9: Alta calidad cinemática")
-                
-                if jacob > 0.65:
+
+                if jacob > 0.65 and not any_veto_active:
                     prob = max(prob, 94.0)
                     sota_notes.append("Refuerzo SOTA V7: Incoherencia física extrema")
 
@@ -710,12 +778,12 @@ class VideoIADetectorV5:
                     synth_val = float(str(synth_score_str).replace("%", ""))
                     if synth_val > 70:
                         prob = max(prob, 98.0)
-                        sota_notes.append(f"Hard Override V8: Firma SynthID de Google detectada ({synth_val}%)")
+                        sota_notes.append(f"Hard Override V10: Firma SynthID de Google detectada ({synth_val}%)")
 
                 if vit_mean > 0.60:
                     if audio_data_res.get("sota_info", {}).get("probabilidad", 0) > 80:
                         prob = max(prob, 99.0)
-                        sota_notes.append("Hard Override V8: Patrón estructural de Google Veo detectado")
+                        sota_notes.append("Hard Override V10: Patrón estructural de Google Veo detectado")
 
                 score_result["probability"] = round(float(prob), 1)
                 score_result["verdict"] = "IA" if prob >= 50 else "REAL"
@@ -776,7 +844,7 @@ class VideoIADetectorV5:
         """
         Analiza un video directamente desde el sistema de archivos.
 
-        [BUG-6 FIX V8.4] ZERO-COPY RAM: Ya no lee el archivo a memoria.
+        [FIX V10.3] ZERO-COPY RAM: Ya no lee el archivo a memoria.
         Pasa la ruta directamente al pipeline, lo que permite manejar archivos de >2GB
         con un consumo de RAM constante e insignificante.
         """

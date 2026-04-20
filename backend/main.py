@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routes_analyze import router as analyze_router
+from api.routes_auth import router as auth_router
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
@@ -34,11 +35,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 app.include_router(analyze_router)
+app.include_router(auth_router)
 
 if __name__ == "__main__":
     import uvicorn

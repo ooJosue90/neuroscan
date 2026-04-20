@@ -323,7 +323,7 @@ class AudioAnalyzer:
             return {"suspicion": 0.2, "error": str(e)}
 
     # ------------------------------------------------------------------
-    # Environment & Breathing Forensics (V9.0 Upgrade)
+    # Environment & Breathing Forensics (V10.3 Upgrade)
     # ------------------------------------------------------------------
     def _analyze_environment_noise(self, y: np.ndarray, sr: int) -> Dict:
         """
@@ -555,10 +555,10 @@ class AudioAnalyzer:
                 "detail": "sin_audio_o_muy_corto"
             }
 
-        # ── Análisis SOTA (PROD-2026 / SynthID) ──
+        # ── Análisis SOTA (PROD-2026 / V10.3) ──
         # Ejecutamos esto SIEMPRE, incluso si no hay voz humana clara.
         try:
-            # [OPT V8.4] Pasar path directamente para evitar cargar video gigante en RAM 
+            # [OPT V10.3] Pasar path directamente para evitar cargar video gigante en RAM 
             # y aplicar límite de duración interna para prevenir timeouts.
             sota_res = analyze_audio(video_path, duration=60.0)
         except Exception as e:

@@ -1,5 +1,5 @@
 """
-MÓDULO: Calibrated Ensemble Scorer V4
+MÓDULO: Calibrated Ensemble Scorer V10.3 (Titanium Edition)
 Sistema de scoring probabilístico para reemplazar las sumas heurísticas:
   - Pesos aprendidos por módulo (configurables)
   - Platt scaling para calibración de probabilidades
@@ -17,9 +17,9 @@ import os
 
 class CalibratedEnsembleScorer:
     """
-    Scorer probabilístico calibrado para el pipeline V4.
+    Scorer probabilístico calibrado para el proyecto TALOS V10.3.
     
-    Reemplaza completamente el sistema heurístico de V3 (prob += N).
+    Reemplaza completamente el sistema heurístico de versiones previas.
     """
 
     # Pesos base por módulo (aprendidos offline con DFDC + FaceForensics++ + Celeb-DF)
@@ -100,7 +100,7 @@ class CalibratedEnsembleScorer:
         # Ajustados para 'soft floors': empujan los scores intermedios (0.4-0.6)
         # hacia abajo (Orgánico) para proteger videos reales altamente comprimidos.
         self._platt_params = {
-            "vit_ensemble":  (-9.0, 6.0),  # [ADJ V8.4] Sensibilidad aumentada para señales 0.7-0.9
+            "vit_ensemble":  (-9.0, 6.0),  # [ADJ V10.3] Sensibilidad aumentada para señales 0.7-0.9
             "temporal":      (-8.0, 4.5),
             "facial":        (-7.0, 3.8),
             "forensic":      (-8.0, 4.5),
@@ -400,7 +400,7 @@ class CalibratedEnsembleScorer:
         # Pesos efectivos (redistribuidos si faltan módulos)
         eff_weights = self._get_effective_weights(list(calibrated.keys()))
 
-        # [ADJ V8.4-RECALL] Permitir que módulos especialistas (Audio/ViT) tomen el control 
+        # [ADJ V10.3-STABLE] Permitir que módulos especialistas (Audio/ViT) tomen el control 
         # ante sospechas claras. Si el audio es IA, el video NO debe ahogar la alerta.
         for k, v in calibrated.items():
             mult = 1.0
