@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import CLIPModel, CLIPProcessor
 
-logger = logging.getLogger("Nueroscan.AIImageDetector")
+logger = logging.getLogger("Talos.AIImageDetector")
 
 class AIImageDetector(nn.Module):
     """
@@ -22,10 +22,14 @@ class AIImageDetector(nn.Module):
         self,
         clip_model_name: str = "openai/clip-vit-large-patch14",
         hidden_dim: int = 256,
-        threshold: float = 0.5
+        threshold: float = 0.5,
+        freeze_backbones: bool = True,
+        use_amp: bool = True,
+        compile_model: bool = False
     ):
         super().__init__()
         self.threshold = threshold
+        self.use_amp = use_amp
         
         # Branch 1: CLIP embeddings (Semántico de alto nivel)
         # CLIP ViT-L/14 embedding base dim = 768
@@ -34,28 +38,7 @@ class AIImageDetector(nn.Module):
         self.clip_head = nn.Sequential(nn.Linear(768, hidden_dim), nn.GELU())
         
         # Branch 2: EfficientNet (Texturas y artefactos de bajo nivel)
-        logger.info("Cargando EfficientNet-B4")
-        self.efficientnet = None
-        eff_out_dim = 1792 # Default para B4 ns
-        
-        try:
-            import timm
-            self.efficientnet = timm.create_model(
-                "tf_efficientnet_b4_ns",
-                pretrained=True,
-                features_only=True,
-            )
-            eff_out_dim = self.efficientnet.feature_info.channels()[-1]
-            logger.info("EfficientNet cargado con timm (out_dim=%s)", eff_out_dim)
-        except Exception as e:
-            logger.warning("timm no disponible o fallo de carga (%s). Fallback TorchHub.", e)
-            self.efficientnet = torch.hub.load(
-                "NVIDIA/DeepLearningExamples:torchhub",
-                "nvidia_efficientnet_b4",
-                pretrained=True,
-            )
-            eff_out_dim = 1792
-
+        self.efficientnet, eff_out_dim = self._load_efficientnet()
         self.eff_head = nn.Sequential(nn.Linear(eff_out_dim, hidden_dim), nn.GELU())
         
         # Norm adjustment buffers: CLIP vs ImageNet
@@ -91,14 +74,100 @@ class AIImageDetector(nn.Module):
             nn.GELU(),
         )
         
-        # Fusion Head: retorna LOGITS
-        self.classifier = nn.Sequential(
+        # Fusion & Classifier: retorna LOGITS (B,)
+        self.fusion = nn.Sequential(
             nn.Linear(hidden_dim * 4, 512),
-            nn.BatchNorm1d(512),
+            nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, 1)
+            nn.Dropout(0.3)
         )
+        self.classifier = nn.Linear(512, 1)
+        
+        if freeze_backbones:
+            self.freeze_backbones()
+
+        if compile_model:
+            self._try_compile()
+
+    @staticmethod
+    def _load_efficientnet():
+        """Carga robusta de EfficientNet."""
+        try:
+            import timm
+            logger.info("Cargando EfficientNet-B4 vía timm...")
+            model = timm.create_model(
+                "tf_efficientnet_b4_ns",
+                pretrained=True,
+                features_only=True,
+            )
+            out_dim = model.feature_info.channels()[-1]
+            return model, out_dim
+        except ImportError:
+            raise RuntimeError("timm no instalado. Ejecuta: pip install timm")
+        except Exception as e:
+            raise RuntimeError(f"Fallo al cargar EfficientNet: {e}")
+
+    def _try_compile(self):
+        """Optimiza componentes vía torch.compile (PyTorch 2.0+)."""
+        try:
+            self.fft_conv = torch.compile(self.fft_conv)
+            self.residual_conv = torch.compile(self.residual_conv)
+            self.fusion = torch.compile(self.fusion)
+            logger.info("torch.compile aplicado exitosamente.")
+        except Exception as e:
+            logger.warning("torch.compile no disponible o falló: %s", e)
+
+    def freeze_backbones(self):
+        """Congela CLIP y EfficientNet para entrenar solo las cabezas de fusión."""
+        for param in self.clip.parameters():
+            param.requires_grad = False
+        if self.efficientnet:
+            for param in self.efficientnet.parameters():
+                param.requires_grad = False
+        logger.info("Backbones (CLIP & EfficientNet) congelados. Solo las cabezas son entrenables.")
+
+    def unfreeze_clip(self, layers_from_end: Optional[int] = None):
+        """
+        Descongela CLIP para fine-tuning avanzado.
+        Args:
+            layers_from_end: None -> todo, N -> últimas N capas del transformer.
+        """
+        if layers_from_end is None:
+            for param in self.clip.parameters():
+                param.requires_grad = True
+            logger.info("CLIP totalmente descongelado.")
+        else:
+            # HuggingFace CLIPModel structure: vision_model.encoder.layers
+            encoder_layers = self.clip.vision_model.encoder.layers
+            total = len(encoder_layers)
+            for i, layer in enumerate(encoder_layers):
+                if i >= total - layers_from_end:
+                    for param in layer.parameters():
+                        param.requires_grad = True
+            logger.info("Últimas %d capas de CLIP descongeladas.", layers_from_end)
+
+    def unfreeze_efficientnet(self, stages_from_end: Optional[int] = None):
+        """
+        Descongela EfficientNet para fine-tuning.
+        Args:
+            stages_from_end: None -> todo, N -> últimos N bloques/stages.
+        """
+        if self.efficientnet is None: return
+        
+        if stages_from_end is None:
+            for param in self.efficientnet.parameters():
+                param.requires_grad = True
+            logger.info("EfficientNet totalmente descongelado.")
+        else:
+            # Para EfficientNet de timm, solemos trabajar con 'blocks'
+            if hasattr(self.efficientnet, 'blocks'):
+                blocks = self.efficientnet.blocks
+                total = len(blocks)
+                for i, stage in enumerate(blocks):
+                    if i >= total - stages_from_end:
+                        for param in stage.parameters():
+                            param.requires_grad = True
+                logger.info("Últimos %d bloques de EfficientNet descongelados.", stages_from_end)
         
     def _adjust_norm_for_eff(self, x: torch.Tensor) -> torch.Tensor:
         """Convierte normalización de CLIP (input) a normalización de ImageNet (EfficientNet)."""
@@ -160,16 +229,24 @@ class AIImageDetector(nn.Module):
         
         # FUSIÓN
         combined = torch.cat([clip_feat, eff_feat, fft_feat, residual_feat], dim=1)
-        return self.classifier(combined)
+        fused = self.fusion(combined)
+        return self.classifier(fused).squeeze(-1)
 
     @torch.no_grad()
     def predict_proba(self, pixel_values: torch.Tensor) -> Dict[str, any]:
-        """Salida calibrada para inferencia forense."""
-        self.eval() # Asegura comportamiento consistente de BatchNorm/Dropout
-        logits = self.forward(pixel_values)
-        prob_ai = torch.sigmoid(logits)
+        """Salida calibrada para inferencia forense con Mixed Precision."""
+        self.eval()
+        device = next(self.parameters()).device
         
-        # Predicción basada en umbral
+        # Autocast adaptativo: fp16 en CUDA, bfloat16 en CPU
+        amp_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
+        
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=self.use_amp):
+            logits = self(pixel_values) # Llama a __call__ para hooks
+        
+        # Convertimos a fp32 para sigmoid (estabilidad numérica)
+        logits = logits.float()
+        prob_ai = torch.sigmoid(logits)
         is_ai = (prob_ai > self.threshold).float()
         
         return {
@@ -178,6 +255,28 @@ class AIImageDetector(nn.Module):
             "is_ai": is_ai,
             "threshold": self.threshold
         }
+
+    def count_trainable_params(self) -> Dict[str, int]:
+        """Diagnóstico de parámetros entrenables."""
+        components = {
+            "clip": self.clip,
+            "clip_head": self.clip_head,
+            "efficientnet": self.efficientnet,
+            "eff_head": self.eff_head,
+            "fft_conv": self.fft_conv,
+            "residual_conv": self.residual_conv,
+            "fusion": self.fusion,
+            "classifier": self.classifier
+        }
+        return {
+            name: sum(p.numel() for p in mod.parameters() if p.requires_grad)
+            for name, mod in components.items() if mod is not None
+        }
+
+    def estimate_vram_mb(self) -> float:
+        """Estimación aproximada de VRAM en fp16."""
+        total_params = sum(p.numel() for p in self.parameters())
+        return (total_params * 2) / (1024 ** 2)
 
     def set_threshold(self, value: float):
         """Ajusta la sensibilidad del detector centralmente."""

@@ -175,8 +175,8 @@ class HiveAnalyzer:
                 "error": "No se pudo analizar ningún frame (rate-limit o error)"
             }
 
-        # Consolidar: máxima sospecha encontrada (conservador)
-        max_suspicion = max(r["suspicion"] for r in results)
+        # Consolidar: máxima sospecha encontrada en IMAGEN (frames)
+        max_suspicion = max(r["suspicion_image"] for r in results)
         suspects = [r.get("top_suspect", "unknown") for r in results if r.get("top_suspect") != "unknown"]
         top_suspect = max(set(suspects), key=suspects.count) if suspects else "unknown"
 
@@ -218,6 +218,8 @@ class HiveAnalyzer:
 
             return {
                 "suspicion": round(es_ia, 4),
+                "suspicion_image": round(es_ia_image, 4),
+                "suspicion_audio": round(es_ia_audio, 4),
                 "available": True,
                 "top_suspect": top_suspect,
                 "top_suspect_confidence": round(top_conf * 100, 2),

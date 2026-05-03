@@ -76,7 +76,7 @@ SAMPLE_RATE      = 16_000
 MIN_DURATION_S   = 0.5
 CHUNK_DURATION_S = 15        # Máximo por chunk para Wav2Vec2
 CHUNK_OVERLAP_S  = 1         # Overlapping entre chunks
-MAX_ANALYSIS_DURATION = 60.0   # [FIX-V8.4] Límite para evitar timeouts en archivos largos
+MAX_ANALYSIS_DURATION = 30.0   # [OPT-V10.4] Reducido de 60 a 30s para máxima velocidad
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Umbrales V7 (RECALIBRADOS con datos benchmark reales del 12-Abr-2026)
@@ -919,16 +919,16 @@ def analyze_audio(data: Any, duration: float = MAX_ANALYSIS_DURATION) -> dict:
             logger.info("Override V8.4-B: LFCC=%.3f, Base=%.1f%%, SOTA=%.1f%% → prob=%.1f%%",
                         lfcc_var, p_base, p_2025, prob_final)
 
-        # [NEW-V10.3] Refuerzo Hive para Audio
+        # [NEW-V10.3] Refuerzo Hive para Audio (Pesos Prioritarios)
         if hive_available:
-            if hive_prob > 75:
-                # Refuerzo agresivo si Hive está muy seguro
-                prob_final = max(prob_final, hive_prob * 0.92 + prob_final * 0.08)
-                reasons.append(f"\u2726 Confirmado por The Hive: Alta sospecha de {hive_suspect.upper()} ({hive_prob:.1f}%)")
-            elif hive_prob > 45:
-                # Refuerzo moderado por promedio
-                prob_final = max(prob_final, (prob_final + hive_prob) / 2)
-                reasons.append(f"\u25b3 Senal Hive: Patron sospechoso de {hive_suspect.upper()} ({hive_prob:.1f}%)")
+            if hive_prob > 70: # Bajado de 75 a 70 para mayor cobertura
+                # Refuerzo ultra-agresivo: Hive domina si detecta IA clara
+                prob_final = max(prob_final, hive_prob * 0.96 + prob_final * 0.04)
+                reasons.append(f"\u2726 Validado por The Hive (Audio SOTA): Alta sospecha de {hive_suspect.upper()} ({hive_prob:.1f}%)")
+            elif hive_prob > 40: # Bajado de 45 a 40
+                # Refuerzo prioritario: Pesamos más a Hive (65%) que al ensemble local (35%)
+                prob_final = max(prob_final, (prob_final * 0.35 + hive_prob * 0.65))
+                reasons.append(f"\u25b3 Senal prioritaria Hive: Patron sospechoso de {hive_suspect.upper()} ({hive_prob:.1f}%)")
 
         n_evidence = sum(1 for r in reasons if r.startswith("\u2726"))
         n_exon     = sum(1 for r in reasons if r.startswith("\u2296"))
@@ -946,7 +946,9 @@ def analyze_audio(data: Any, duration: float = MAX_ANALYSIS_DURATION) -> dict:
             integrity_notes.append(f"Audio ligeramente saturado ({clip_ratio*100:.1f}%)")
 
         # ── 9. Veredicto y nota resumen ───────────────────────────────────────
-        verdict = "IA" if prob_final >= 50 else "REAL"
+        if prob_final >= 60: verdict = "IA"
+        elif prob_final > 40: verdict = "INCIERTO"
+        else: verdict = "REAL"
         nota_parts = [
             f"Analisis V7 completado. {n_evidence} senales de IA, {n_exon} senales humanas."
         ]

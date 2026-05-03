@@ -25,18 +25,19 @@ class CalibratedEnsembleScorer:
     # Pesos base por módulo (aprendidos offline con DFDC + FaceForensics++ + Celeb-DF)
     # Ajustables post-calibración. Suma = 1.0
     DEFAULT_WEIGHTS = {
-        "temporal":     0.35,
-        "forensic":     0.30,
-        "facial":       0.15,
-        "deep_sync":    0.10, # Nuevo factor crítico Omega V5
+        "hive":         0.35, # [V10.4] Máxima autoridad: Hive domina el ensemble
+        "temporal":     0.20,
+        "forensic":     0.15,
+        "facial":       0.10,
+        "deep_sync":    0.10,
         "audio":        0.05,
         "vit_ensemble": 0.05,
-        "lip_sync":     0.03,
     }
 
     # Umbrales de veredicto
     VERDICT_THRESHOLDS = {
-        "IA":                      0.50,  # V10.3 Standard
+        "IA":                      0.60,  # V10.4 Titanium Standard
+        "INCIERTO":                0.41,
         "REAL":                    0.00,  
     }
 
@@ -408,10 +409,10 @@ class CalibratedEnsembleScorer:
             elif v > 0.70: mult = 2.5  # Alarma crítica
             elif v > 0.50: mult = 1.8  # Sospecha
 
-            # Multiplicador extra para Audio y ViT cuando cruzan el umbral de sospecha inicial
+            # Multiplicador extra para Audio, ViT y HIVE cuando cruzan el umbral de sospecha inicial
             # Esto es vital para detectar 'Dubbing' o 'FaceSwap' donde el fondo es real.
-            if k in ["audio", "vit_ensemble"] and v > 0.30:
-                mult *= 2.8
+            if k in ["audio", "vit_ensemble", "hive"] and v > 0.30:
+                mult *= 3.0 # Aumentado de 2.8 a 3.0 para Hive
             
             eff_weights[k] *= mult
                 

@@ -1,8 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routes_analyze import router as analyze_router
-from api.routes_auth import router as auth_router
 from contextlib import asynccontextmanager
+import os
+
+# Cargar variables de entorno de forma robusta
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print(">>> [Aviso] python-dotenv no instalado. Configura las variables manualmente.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -40,7 +47,6 @@ app.add_middleware(
 )
 
 app.include_router(analyze_router)
-app.include_router(auth_router)
 
 if __name__ == "__main__":
     import uvicorn
@@ -48,4 +54,4 @@ if __name__ == "__main__":
 
 @app.get("/")
 def root():
-    return {"message": "NEURO-SCAN PRO API"}
+    return {"message": "TALOS PRO API"}

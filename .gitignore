@@ -21,3 +21,5 @@ temp/
 *.pt
 *.db
 backend/models/checkpoints/
+backend/data/
+backend/models/weights/

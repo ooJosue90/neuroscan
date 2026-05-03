@@ -4,751 +4,594 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TALOS | FORENSIC AI STATION</title>
-    <link rel="icon" href="favicon.png" type="image/png">
-    <!-- CSS Externo -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;700&family=JetBrains+Mono&display=swap"
+    <title>TALOS | Verifica si un archivo es confiable</title>
+    <meta name="description"
+        content="Sube tu imagen, audio o video y descubre si es real o fue creado con inteligencia artificial.">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="style.css?v=10.5.2">
-    <script src="talos_forensic_v10.js?v=10.3.3" defer></script>
-
-    <!-- Librerías Externas -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://unpkg.com/wavesurfer.js@7"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <link rel="stylesheet" href="style_v2.css?v=11.5">
+    <script src="talos_forensic_v10.js?v=10.3.5" defer></script>
+    <script src="talos_anime_fx.js?v=1.0" defer></script>
 </head>
 
 <body>
-    <!-- Fondo Animado de Figuras Geométricas -->
     <canvas id="bgCanvas"></canvas>
     <div class="grid-pulse"></div>
     <div id="hud-bits-container"></div>
 
-    <!-- Botones de Control Superpuestos -->
-    <button class="btn-menu" id="sidebarToggle" title="Menú Lateral">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <line x1="3" y1="6" x2="21" y2="6"></line>
-            <line x1="3" y1="18" x2="21" y2="18"></line>
-        </svg>
-    </button>
-    <button class="btn-help" id="btnHelp">?</button>
-
-    <!-- Menú Lateral (Sidebar) -->
+    <!-- SIDEBAR BACKDROP -->
     <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+    <!-- SIDEBAR -->
     <aside class="sidebar" id="sidebar">
-        <div class="sidebar-header">
-            <div>
-                <h4>TALOS</h4>
-                <p class="small text-muted mb-0">V10.3 FORENSIC</p>
+        <div class="sidebar-logo">
+            <div class="sidebar-logo-main">
+                <span class="logo-mark">T</span>
+                <div class="logo-text-wrapper">
+                    <div class="logo-name">TALOS</div>
+                    <div class="logo-sub">Verificador de archivos</div>
+                </div>
             </div>
+            <button class="btn-sidebar-collapse" id="btnCollapseSidebar" title="Contraer menú">
+                <i class="fa-solid fa-bars-staggered"></i>
+            </button>
         </div>
         <ul class="nav-menu">
             <li id="nav-scanner" class="active">
-                <a href="#" onclick="switchTab('scanner')">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                        stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M3 7V5a2 2 0 0 1 2-2h2" />
-                        <path d="M17 3h2a2 2 0 0 1 2 2v2" />
-                        <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
-                        <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
-                        <line x1="7" y1="12" x2="17" y2="12" />
-                        <polyline points="12 7 12 17" />
-                    </svg>
-                    ESCÁNER
+                <a href="#" onclick="switchTab('scanner')" title="Analizar archivo">
+                    <i class="fa-solid fa-magnifying-glass nav-icon"></i>
+                    <span class="nav-text">Analizar archivo</span>
                 </a>
             </li>
             <li id="nav-database">
-                <a href="#" onclick="switchTab('database')">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                        stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M12 8v4l3 3" />
-                        <circle cx="12" cy="12" r="9" />
-                        <path d="M3.3 7a9 9 0 0 1 1.2-1.7" />
-                        <path d="M19.5 5.3A9 9 0 0 1 21 12" />
-                    </svg>
-                    HISTORIAL
-                </a>
-            </li>
-            <li id="nav-contact">
-                <a href="#" onclick="switchTab('contact')">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                        stroke-linecap="round" stroke-linejoin="round">
-                        <rect x="2" y="4" width="20" height="16" rx="2" />
-                        <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
-                        <path d="M12 18h.01" />
-                    </svg>
-                    CONTACTO
+                <a href="#" onclick="switchTab('database')" title="Historial">
+                    <i class="fa-solid fa-clock-rotate-left nav-icon"></i>
+                    <span class="nav-text">Historial</span>
                 </a>
             </li>
             <li id="nav-academy">
-                <a href="#" onclick="switchTab('academy')">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                        stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M22 10v6M2 10l10-5 10 5-10 5z" />
-                        <path d="M6 12v5c3 3 9 3 12 0v-5" />
-                    </svg>
-                    ACADEMY
+                <a href="#" onclick="switchTab('academy')" title="Aprender">
+                    <i class="fa-solid fa-book-open-reader nav-icon"></i>
+                    <span class="nav-text">Aprender</span>
                 </a>
             </li>
-            <li id="nav-challenge">
-                <a href="#" onclick="switchTab('challenge')">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                        stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                        <circle cx="12" cy="11" r="3" />
-                    </svg>
-                    EXAMEN IA
-                </a>
-            </li>
-            <li class="mt-4 border-top border-secondary border-opacity-25 pt-2">
-                <a href="#" onclick="logout()" class="text-danger opacity-75">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                        <polyline points="16 17 21 12 16 7" />
-                        <line x1="21" y1="12" x2="9" y2="12" />
-                    </svg>
-                    CERRAR SESIÓN
+            <li id="nav-contact">
+                <a href="#" onclick="switchTab('contact')" title="Ayuda y contacto">
+                    <i class="fa-solid fa-life-ring nav-icon"></i>
+                    <span class="nav-text">Ayuda y contacto</span>
                 </a>
             </li>
         </ul>
-        <div class="sidebar-footer">
-            <div class="sys-status">
-                <span class="status-dot"></span>
-                <span class="status-blink">CLÚSTER ACTIVO</span>
+        <div class="sidebar-footer-area">
+            <div class="status-pill">
+                <span class="status-dot-live"></span>
+                <span class="status-text">Servicio activo</span>
             </div>
         </div>
     </aside>
 
-    <div class="bg-glow-1"></div>
-    <div class="bg-glow-2"></div>
+    <!-- NAV BUTTONS -->
+    <button class="btn-hamburger" id="sidebarToggle" title="Menú">
+        <i class="fa-solid fa-bars"></i>
+    </button>
+    <button class="btn-help-floating dark-outlined" id="btnHelp">
+        <i class="fa-regular fa-circle-question"></i>
+        <span>Ayuda</span>
+    </button>
 
-    <!-- Decals Decorativos eliminados por estética -->
+    <!-- MAIN CONTENT -->
+    <div class="page-wrapper">
 
-    <div class="container py-0">
-        <!-- Panel de Escaneo -->
+        <!-- SCAN PANEL -->
         <main id="scanPanel">
-            <header class="text-center mb-3">
-                <h1 class="cool-title mb-0">TALOS </h1>
-                <p class="text-info small forensic-subtitle">FORENSIC AI ANALYZER</p>
-            </header>
+            <div class="page-header">
+                <h1 class="brand-title">TALOS</h1>
+                <p class="brand-tagline">Revisa si un archivo es confiable</p>
+            </div>
 
-            <div class="main-container col-lg-12 mx-auto shadow-lg" id="mainPanel">
+            <div class="card-main-wrapper" id="mainPanel">
 
+                <!-- UPLOAD UI -->
                 <div id="ui-upload">
-                    <!-- SELECCIÓN DE MODO -->
-                    <div id="scan-mode-selection" class="row g-4 mb-4">
-                        <div class="col-md-6">
-                            <div class="mode-card d-flex flex-column align-items-center justify-content-center p-4 border border-info border-opacity-50 rounded cursor-pointer h-100 w-100 shadow"
-                                onclick="selectScanMode('file')" tabindex="0" data-mode="file">
-                                <div class="card-corners"></div>
-                                <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--info)"
-                                    stroke-width="1.5" class="mb-3">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                                    <polyline points="17 8 12 3 7 8"></polyline>
-                                    <line x1="12" y1="3" x2="12" y2="15"></line>
-                                </svg>
-                                <h5 class="text-info fw-bold mb-2 uppercase">ESCANEO LOCAL</h5>
-                                <p class="text-white-50 small text-center mb-0">Imagen, audio o video<br>desde el
-                                    dispositivo</p>
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="mode-card d-flex flex-column align-items-center justify-content-center p-4 border border-info border-opacity-50 rounded cursor-pointer h-100 w-100 shadow"
-                                onclick="selectScanMode('url')" tabindex="0" data-mode="url">
-                                <div class="card-corners"></div>
-                                <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--info)"
-                                    stroke-width="1.5" class="mb-3">
-                                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-                                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-                                </svg>
-                                <h5 class="text-info fw-bold mb-2 uppercase">ESCANEO POR URL</h5>
-                                <p class="text-white-50 small text-center mb-0">Extracción de enlace<br>público en red
-                                </p>
-                            </div>
+
+                    <!-- MODE SELECTION -->
+                    <div id="scan-mode-selection">
+                        <p class="section-label">¿Qué quieres analizar?</p>
+                        <div class="mode-grid">
+                            <button class="flat-card" onclick="selectScanMode('file')" tabindex="0" data-mode="file">
+                                <div class="card-icon-box">
+                                    <i class="fa-solid fa-upload"></i>
+                                </div>
+                                <h3 class="card-title">Subir archivo</h3>
+                                <p class="card-desc">Sube una imagen, video o audio desde tu dispositivo para
+                                    analizarlo.</p>
+                                <div class="card-action-btn">
+                                    Empezar <i class="fa-solid fa-arrow-right"></i>
+                                </div>
+                            </button>
+                            <button class="flat-card" onclick="selectScanMode('url')" tabindex="0" data-mode="url">
+                                <div class="card-icon-box">
+                                    <i class="fa-solid fa-link"></i>
+                                </div>
+                                <h3 class="card-title">Analizar por enlace</h3>
+                                <p class="card-desc">Pega un enlace de redes sociales (YouTube, TikTok, Instagram) para
+                                    revisión.</p>
+                                <div class="card-action-btn">
+                                    Empezar <i class="fa-solid fa-arrow-right"></i>
+                                </div>
+                            </button>
                         </div>
                     </div>
 
-                    <!-- MODO ARCHIVO -->
+                    <!-- FILE SCAN MODE -->
                     <div id="ui-file-scan" class="d-none">
-                        <button class="btn btn-sm btn-outline-secondary mb-3 d-flex align-items-center"
-                            onclick="resetScanMode()" style="font-size: 0.75rem; letter-spacing: 1px;">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2" class="me-2">
-                                <path d="M19 12H5M12 19l-7-7 7-7" />
-                            </svg> VOLVER A OPCIONES
-                        </button>
-                        <div class="upload-area mb-4" id="dropZone" tabindex="0">
-                            <div class="card-corners"></div>
-                            <div class="scan-line" id="scanner"></div>
-                            <div id="uploadContent"
-                                class="d-flex flex-column align-items-center justify-content-center">
-                                <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                    stroke-width="1.5">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                                    <polyline points="17 8 12 3 7 8"></polyline>
-                                    <line x1="12" y1="3" x2="12" y2="15"></line>
-                                </svg>
-                                <h4 class="fw-bold mb-1">BUFFER DE EVIDENCIA</h4>
-                                <p class="text-secondary small">Cargar muestra para análisis de coherencia neuronal</p>
+                        <!-- ZONA DE CARGA -->
+                        <div class="upload-zone" id="dropZone" tabindex="0">
+                            <!-- Botón volver integrado dentro de la caja -->
+                            <div class="inside-box-header">
+                                <button class="btn-back-inside" onclick="resetScanMode(event)">
+                                    <i class="fa-solid fa-arrow-left"></i> Volver
+                                </button>
                             </div>
-                            <img id="imgPreview" class="d-none">
-                            <video id="videoPreview" controls class="d-none" onclick="event.stopPropagation()"></video>
-                            <div id="audioWrapper" onclick="event.stopPropagation()">
-                                <div id="waveform"></div>
-                                <p class="play-btn" id="playBtn">▶ REPRODUCIR AUDIO</p>
+                            <div id="uploadContent" class="upload-placeholder">
+                                <div class="upload-icon-wrap">
+                                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                                </div>
+                                <h3 class="upload-title">Haz clic aquí o arrastra tu archivo</h3>
+                                <p class="upload-hint">Puede ser una imagen, audio o video</p>
+                                <span class="upload-formats">JPG · PNG · MP4 · MP3 · WAV · y más</span>
+                            </div>
+
+                            <!-- PREVISUALIZACIÓN DE MEDIOS -->
+                            <div id="mediaViewerWrapper" class="d-none w-100 media-preview-section">
+                                <div class="audio-header-bar text-center">
+                                    <span class="audio-title-blue" id="mediaViewerTitle">PREVISUALIZACIÓN DE
+                                        ARCHIVO</span>
+                                </div>
+                                <div class="audio-timer-badge-center" style="margin-bottom: 15px;">
+                                    <span id="mediaViewerMeta">Cargando metadatos...</span>
+                                </div>
+
+                                <div class="media-frame-premium">
+                                    <img id="imgPreview" class="d-none preview-img-premium">
+                                    <div id="videoWrapper" class="video-container d-none"
+                                        onclick="event.stopPropagation()">
+                                        <video id="videoPreview" controls class="preview-video-premium"></video>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div id="audioWrapper" onclick="event.stopPropagation()"
+                                class="audio-container d-none media-preview-section">
+                                <div class="audio-header-bar text-center">
+                                    <span class="audio-title-blue">REPRODUCTOR DE AUDIO</span>
+                                </div>
+                                <div class="audio-timer-badge-center" style="margin-bottom: 15px;">
+                                    <span id="currentTime">0:00</span> / <span id="totalTime">0:00</span> <span
+                                        id="audioMeta"> • 44.1 kHz • MP3</span>
+                                </div>
+                                <div id="waveform" class="waveform-box"></div>
+                                <div class="audio-controls-big">
+                                    <button class="btn-play-big" id="playBtn"><i class="fa-solid fa-play"></i></button>
+                                    <button class="btn-stop-big" id="stopBtn"><i
+                                            class="fa-solid fa-square"></i></button>
+                                </div>
+                            </div>
+
+                            <div id="removeFileBtnWrapper" class="d-none w-100" style="margin-top: 20px; z-index: 10;">
+                                <button class="btn-danger-outline" onclick="clearFileSelection(event)">
+                                    <i class="fa-solid fa-trash-can"></i> Quitar archivo
+                                </button>
                             </div>
                         </div>
+
+                        <div class="scan-line-bar" id="scanner"></div>
                         <input type="file" id="fileInput" hidden accept="image/*,video/*,audio/*">
-                        <button class="btn btn-scan w-100" id="scanBtn">EJECUTAR ESCANEO</button>
-                    </div>
 
-                    <!-- MODO URL -->
-                    <div id="ui-url-scan" class="d-none">
-                        <button class="btn btn-sm btn-outline-secondary mb-3 d-flex align-items-center"
-                            onclick="resetScanMode()" style="font-size: 0.75rem; letter-spacing: 1px;">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                stroke-width="2" class="me-2">
-                                <path d="M19 12H5M12 19l-7-7 7-7" />
-                            </svg> VOLVER A OPCIONES
+                        <button class="btn-analyze btn-glow mt-4" id="scanBtn" style="margin-top: 30px;">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            Analizar archivo
                         </button>
-                        <div class="upload-area url-scan-area mb-4 position-relative">
-                            <div class="card-corners"></div>
-                            <div class="scan-line" id="scannerUrl" style="display: none;"></div>
-                            <div class="d-flex flex-column align-items-center w-100 p-3 gap-3">
-
-                                <!-- HEADER (ícono + título) -->
-                                <div id="urlScanHeader" class="text-center"
-                                    style="transition: max-height 0.35s ease, opacity 0.3s ease; overflow: hidden;">
-                                    <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="var(--info)"
-                                        stroke-width="1.5" class="mb-2 opacity-75">
-                                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-                                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-                                    </svg>
-                                    <h4 class="fw-bold mb-1">EVIDENCIA EXTERNA</h4>
-                                    <p class="text-secondary small mb-0">Pega el link de TikTok, YouTube, Instagram u
-                                        otro origen de red.</p>
-                                </div>
-
-                                <!-- URL PREVIEW CARD — arriba del input -->
-                                <div id="urlPreviewCard" class="url-preview-card d-none w-100">
-                                    <div class="url-preview-loading" id="urlPreviewLoading">
-                                        <div class="url-preview-spinner"></div>
-                                        <span class="text-info small ms-2">Detectando contenido...</span>
-                                    </div>
-                                    <div id="urlPreviewContent" class="d-none">
-                                        <div class="url-preview-inner">
-                                            <div class="url-preview-thumbnail-wrap" id="urlThumbWrap">
-                                                <img id="urlThumbImg" src="" alt="Thumbnail"
-                                                    class="url-preview-thumb d-none">
-                                                <div id="urlThumbIcon" class="url-preview-thumb-icon d-none">
-                                                    <i id="urlThumbIconEl" class="fa-solid fa-link"></i>
-                                                </div>
-                                            </div>
-                                            <div class="url-preview-info">
-                                                <div class="url-preview-type-badge" id="urlPreviewBadge">
-                                                    <i id="urlPreviewBadgeIcon" class="fa-solid fa-link me-1"></i>
-                                                    <span id="urlPreviewBadgeText">ENLACE</span>
-                                                </div>
-                                                <div class="url-preview-domain" id="urlPreviewDomain">dominio.com</div>
-                                                <div class="url-preview-title" id="urlPreviewTitle">Contenido detectado
-                                                </div>
-                                                <div class="url-preview-meta" id="urlPreviewMeta">Listo para análisis
-                                                    forense</div>
-                                            </div>
-                                        </div>
-                                        <div class="url-preview-glow-line"></div>
-                                    </div>
-                                </div>
-
-                                <!-- INPUT URL — siempre al fondo -->
-                                <div class="url-input-wrapper w-100">
-                                    <div class="cyber-input-group">
-                                        <span class="input-icon-wrap">
-                                            <i class="fa-solid fa-link"></i>
-                                        </span>
-                                        <input type="text" id="urlInput" class="url-field"
-                                            placeholder="Pega el link aquí..." onkeypress="handleUrlKeyPress(event)"
-                                            oninput="handleUrlPreview(this.value)"
-                                            onpaste="setTimeout(() => handleUrlPreview(this.value), 50)"
-                                            autocomplete="off" spellcheck="false">
-                                        <button class="btn clear-url-btn" onclick="clearUrlInput(event)"
-                                            id="clearUrlBtn" style="display: none;">
-                                            <i class="fa-solid fa-xmark me-1"></i> BORRAR LINK
-                                        </button>
-                                    </div>
-                                </div>
-
-                            </div>
-                        </div>
-                        <button class="btn btn-scan w-100" id="scanUrlBtn" type="button">ANALIZAR URL</button>
                     </div>
 
-                    <div class="terminal-wrapper mb-4 mt-4" id="terminalWrapper">
-                        <div class="terminal-header">
-                            <div class="terminal-dots">
-                                <span></span><span></span><span></span>
+                    <!-- URL SCAN MODE -->
+                    <div id="ui-url-scan" class="d-none">
+                        <div class="url-zone mt-4">
+                            <!-- Botón volver integrado dentro de la caja -->
+                            <div class="inside-box-header">
+                                <button class="btn-back-inside" onclick="resetScanMode(event)">
+                                    <i class="fa-solid fa-arrow-left"></i> Volver
+                                </button>
                             </div>
-                            <div class="terminal-title">FORENSIC_STREAM // STDOUT</div>
-                            <div class="terminal-session">ID: TS-992</div>
+                            <div id="urlScanHeader" class="url-header-block">
+                                <div class="url-icon-wrap-premium">
+                                    <div class="icon-ring-pulse"></div>
+                                    <i class="fa-solid fa-globe"></i>
+                                </div>
+                                <h3 class="upload-title">Pega el enlace aquí</h3>
+                                <p class="upload-hint">TALOS extraerá el contenido automáticamente</p>
+
+                                <div class="platform-support-row">
+                                    <div class="platform-chip" data-platform="youtube"><i
+                                            class="fa-brands fa-youtube"></i> YouTube</div>
+                                    <div class="platform-chip" data-platform="tiktok"><i
+                                            class="fa-brands fa-tiktok"></i> TikTok</div>
+                                    <div class="platform-chip" data-platform="instagram"><i
+                                            class="fa-brands fa-instagram"></i> Instagram</div>
+                                    <div class="platform-chip" data-platform="twitter"><i
+                                            class="fa-brands fa-x-twitter"></i> Twitter/X</div>
+                                </div>
+                            </div>
+
+                            <!-- URL Preview Card -->
+                            <div id="urlPreviewCard" class="url-preview-card d-none">
+                                <div class="url-preview-loading" id="urlPreviewLoading">
+                                    <div class="spinner-ring"></div>
+                                    <span>Detectando contenido...</span>
+                                </div>
+                                <div id="urlPreviewContent" class="d-none url-preview-inner">
+                                    <div class="url-thumb-wrap" id="urlThumbWrap">
+                                        <img id="urlThumbImg" src="" alt="Vista previa" class="url-thumb d-none">
+                                        <div id="urlThumbIcon" class="url-thumb-icon d-none">
+                                            <i id="urlThumbIconEl" class="fa-solid fa-link"></i>
+                                        </div>
+                                    </div>
+                                    <div class="url-meta-info">
+                                        <span class="url-badge" id="urlPreviewBadge">
+                                            <i id="urlPreviewBadgeIcon" class="fa-solid fa-link"></i>
+                                            <span id="urlPreviewBadgeText">ENLACE</span>
+                                        </span>
+                                        <div class="url-domain" id="urlPreviewDomain">dominio.com</div>
+                                        <div class="url-title-text" id="urlPreviewTitle">Contenido detectado</div>
+                                        <div class="url-meta-text" id="urlPreviewMeta">Listo para analizar</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="url-input-group-premium">
+                                <i class="fa-solid fa-link url-input-icon"></i>
+                                <input type="text" id="urlInput" class="url-input-field"
+                                    placeholder="https://www.ejemplo.com/video..." onkeypress="handleUrlKeyPress(event)"
+                                    oninput="handleUrlPreview(this.value)"
+                                    onpaste="setTimeout(() => handleUrlPreview(this.value), 50)" autocomplete="off"
+                                    spellcheck="false">
+                                <button class="url-paste-btn" onclick="pasteFromClipboard(event)"
+                                    title="Pegar desde portapapeles">
+                                    <i class="fa-solid fa-paste"></i>
+                                </button>
+                                <button class="url-clear-btn" onclick="clearUrlInput(event)" id="clearUrlBtn"
+                                    style="display:none;">
+                                    <i class="fa-solid fa-xmark"></i>
+                                </button>
+                            </div>
+
+                            <button class="btn-analyze btn-glow mt-4" id="scanUrlBtn" type="button"
+                                style="max-width: 400px; margin-top: 30px !important;">
+                                <i class="fa-solid fa-magnifying-glass"></i>
+                                Analizar enlace
+                            </button>
                         </div>
-                        <div class="terminal-box" id="terminal">
-                            > SISTEMA NEURO-FORENSE LISTO...<br>
-                            > SELECCIONE MODO DE ESCANEO...
-                        </div>
+                    </div>
+
+                    <!-- PROGRESS BLOCK (Removed per user request) -->
+                    <div id="terminalWrapper" style="display:none;">
+                        <!-- Hidden terminal for JS compatibility -->
+                        <div id="terminal" style="display:none;"></div>
                     </div>
                 </div>
 
+                <!-- RESULT UI -->
                 <div id="ui-result" class="d-none">
-                    <div class="result-header-group text-center mb-3">
-                        <h2 class="cool-title small-cool-title mb-3">ANÁLISIS COMPLETADO
-                        </h2>
-                        <p id="analysis-type-subtitle" class="text-secondary opacity-75">Resultados del análisis de
-                            evidencia</p>
+                    <div class="result-header-modern">
+                        <p id="analysis-type-subtitle" class="result-subheading">Resultado del análisis de evidencia</p>
                     </div>
 
-                    <div id="verdict-box" class="cyber-verdict-box mb-3">
-                        <!-- Estructura exacta de la referencia -->
-                        <div class="verdict-body-flex">
-                            <div class="verdict-icons-row mb-3">
-                                <div id="verdict-icon-main" class="verdict-icon-fa"></div>
-                                <div id="verdict-icon-alert" class="verdict-icon-fa"></div>
-                                <h3 id="verdict-title" class="verdict-title-ref ms-3">ANALIZANDO...</h3>
-                            </div>
-
-                            <div class="verdict-text-content">
-                                <p id="verdict-description" class="verdict-desc-ref mb-3">
-                                    Iniciando procesamiento de fragmentos neuronales y verificación de integridad...
-                                </p>
-                                <div class="verdict-footer-ref">
-                                    👉 <span id="verdict-footer">Esperando confirmación...</span>
-                                </div>
-                            </div>
+                    <div id="verdict-box" class="verdict-card-modern">
+                        <div class="verdict-icon-glow" id="verdict-icon-main"></div>
+                        <div class="verdict-content-modern">
+                            <h3 class="verdict-title-modern" id="verdict-title">Analizando…</h3>
+                            <p class="verdict-desc-modern" id="verdict-description">Procesando tu archivo...</p>
+                            <div class="verdict-footer-tag" id="verdict-footer"></div>
                         </div>
                     </div>
 
-                    <div class="text-center mt-3">
-                        <button class="btn cyber-btn-ref" onclick="switchTab('scanner')">
-                            NUEVO ANALISIS
+                    <div class="result-actions-simple">
+                        <button class="btn-analyze btn-secondary-action" onclick="switchTab('scanner')">
+                            <i class="fa-solid fa-rotate-left"></i>
+                            Analizar otro archivo
                         </button>
                     </div>
                 </div>
             </div>
         </main>
 
-        <!-- Panel de Datos (Historial, Contacto, etc.) -->
+        <!-- DATA PANELS -->
         <section id="dataPanel" class="d-none">
+
+            <!-- HISTORY -->
             <div id="ui-database" class="d-none">
-                <header class="text-center mb-4">
-                    <h1 class="cool-title mb-0">TALOS</h1>
-                    <p class="text-info small forensic-subtitle">FORENSIC RECORDS DATABASE</p>
-                    <p class="extra-small text-muted mt-1" style="letter-spacing:2px; opacity:0.4;">ENCRYPTED · LOCAL ·
-                        PERSISTENT</p>
-                </header>
-                <div class="main-container col-lg-12 mx-auto cyber-corners">
-
-                    <div class="db-header d-flex justify-content-between align-items-center mb-4 mt-2">
-                        <div class="d-flex align-items-center gap-3">
-                            <div class="pulse-dot"></div>
-                            <div style="margin-top: 5px; transform: translateY(6px);">
-                                <h3 class="node-title mb-0" style="font-size: 1rem; color: var(--success); line-height: 1;">SISTEMA DE REGISTROS FORENSES</h3>
-                                <p class="extra-small text-muted mb-0">LOCAL_DATABASE // ENCRYPTED_STORAGE</p>
-                            </div>
-                        </div>
-                        <div class="d-flex gap-3 align-items-center">
-                            <div id="dbStats"
-                                class="extra-small fw-bold text-info border border-info border-opacity-25 px-3 py-2 bg-black bg-opacity-50 rounded">
-                                REGISTROS: 0</div>
-                            <button class="btn btn-sm btn-outline-danger extra-small fw-bold px-3 py-2"
-                                onclick="clearDatabase()" style="letter-spacing: 1px; border-radius: 4px;">PURGAR
-                                DB</button>
-                        </div>
+                <div class="page-header">
+                    <h1 class="brand-title">TALOS</h1>
+                    <p class="brand-tagline">Historial de análisis</p>
+                </div>
+                <div class="card-main">
+                    <div class="history-toolbar">
+                        <div class="history-count-badge" id="dbStats">0 análisis</div>
+                        <button class="btn-danger-outline" onclick="clearDatabase()">
+                            <i class="fa-solid fa-trash-can"></i> Borrar historial
+                        </button>
                     </div>
-
                     <div class="history-scroll-container">
-                        <table class="table table-dark table-hover mb-0 forensic-table">
+                        <table class="history-table">
                             <thead>
                                 <tr>
-                                    <th style="width: 20%;">FECHA_REF</th>
-                                    <th style="width: 40%;">EVIDENCIA_ID</th>
-                                    <th style="width: 20%;">VEREDICTO</th>
-                                    <th style="width: 20%;" class="text-end">ACCIONES</th>
+                                    <th>Fecha</th>
+                                    <th>Archivo</th>
+                                    <th>Resultado</th>
+                                    <th class="text-end">Reporte</th>
                                 </tr>
                             </thead>
-                            <tbody id="dbTableBody">
-                                <!-- Se llena dinámicamente -->
-                            </tbody>
+                            <tbody id="dbTableBody"></tbody>
                         </table>
                     </div>
                 </div>
             </div>
 
-            <!-- Panel de Contacto -->
+            <!-- CONTACT -->
             <div id="ui-contact" class="d-none">
-                <header class="text-center mb-1">
-                    <h1 class="cool-title mb-1">TALOS</h1>
-                    <p class="text-info small forensic-subtitle">COMMUNICATIONS &amp; FORENSIC SUPPORT</p>
-                    <p class="extra-small text-muted mt-1" style="letter-spacing:2px; opacity:0.4;">AES-256 · ENCRYPTED
-                        CHANNEL</p>
-                </header>
-
-                <div class="main-container col-lg-12 mx-auto">
-                    <div class="security-banner mb-3">
-                        <div
-                            class="d-flex align-items-center gap-3 p-3 border border-info border-opacity-25 rounded bg-info bg-opacity-10">
-                            <div class="status-indicator">
-                                <div class="dot active"></div>
-                            </div>
-                            <div>
-                                <h6 class="mb-0 text-info fw-bold small">PROTOCOLO ALPHA-7 ACTIVADO</h6>
-                                <p class="mb-0 text-white-50 extra-small">Cifrado de grado militar AES-256
-                                    habilitado. Todas las sesiones son monitoreadas por integridad.</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="row g-4 align-items-stretch">
-                        <!-- Card 01: Soporte Técnico -->
-                        <div class="col-md-4 d-flex">
-                            <div class="contact-node flex-fill">
-                                <div class="node-icon">
-                                    <i class="fa-solid fa-envelope-open-text"></i>
-                                </div>
-                                <h5 class="node-title">SOPORTE TÉCNICO</h5>
-                                <p class="node-desc">Reporte fallos técnicos o errores de detección en el clúster.
-                                </p>
-                                <a href="mailto:support@talos.labs" class="node-link text-info">
-                                    ABRIR TICKET
-                                    <i class="fa-solid fa-arrow-up-right-from-square ms-1"
-                                        style="font-size: 0.7rem;"></i>
-                                </a>
-                            </div>
-                        </div>
-
-                        <!-- Card 02: Auditoría Legal -->
-                        <div class="col-md-4 d-flex">
-                            <div class="contact-node flex-fill">
-                                <div class="node-icon">
-                                    <i class="fa-solid fa-file-contract"></i>
-                                </div>
-                                <h5 class="node-title">PERITAJE LEGAL</h5>
-                                <p class="node-desc">Solicite informes certificados para procesos judiciales.</p>
-                                <a href="mailto:legal@talos.labs" class="node-link text-success">
-                                    SOLICITAR
-                                    <i class="fa-solid fa-arrow-up-right-from-square ms-1"
-                                        style="font-size: 0.7rem;"></i>
-                                </a>
-                            </div>
-                        </div>
-
-                        <!-- Card 03: Comunidad Privada -->
-                        <div class="col-md-4 d-flex">
-                            <div class="contact-node flex-fill">
-                                <div class="node-icon">
-                                    <i class="fa-solid fa-user-secret"></i>
-                                </div>
-                                <h5 class="node-title">HILO FORENSE</h5>
-                                <p class="node-desc">Canal privado para analistas de firmas de IA avanzada.</p>
-                                <a href="#" class="node-link text-warning">
-                                    UNIRSE
-                                    <i class="fa-solid fa-arrow-up-right-from-square ms-1"
-                                        style="font-size: 0.7rem;"></i>
-                                </a>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div
-                        class="mt-3 p-3 border-top border-secondary border-opacity-10 d-flex justify-content-between align-items-center">
-
-                        <div class="d-flex gap-4">
-                            <span class="text-success extra-small fw-bold">ONLINE</span>
-                            <span class="text-secondary extra-small fw-bold">LATENCIA: 14ms</span>
-                        </div>
-                    </div>
+                <div class="page-header">
+                    <h1 class="brand-title">TALOS</h1>
+                    <p class="brand-tagline">Ayuda y contacto</p>
                 </div>
-            </div>
-
-            <!-- Panel de Academia -->
-            <div id="ui-academy" class="d-none">
-                <header class="text-center mb-3">
-                    <h1 class="cool-title mb-0">TALOS </h1>
-                    <p class="text-info small forensic-subtitle">ACADEMY &amp; KNOWLEDGE HUB</p>
-                    <p class="extra-small text-muted mt-1" style="letter-spacing:2px; opacity:0.4;">MÓDULOS ACTUALIZADOS
-                        · NIVEL AVANZADO</p>
-                </header>
-                <div class="main-container col-lg-12 mx-auto cyber-corners">
-
-
-                    <div class="row g-4 text-start">
-                        <!-- Card 01 -->
-                        <div class="col-md-4">
-                            <div class="academy-card h-100">
-                                <div class="card-icon">
-                                    <i class="fa-solid fa-eye-low-vision"></i>
-                                </div>
-                                <h6 class="text-success fw-bold uppercase small mb-2">Fundamentos 01</h6>
-                                <h5>BIOMETRÍA Y COHERENCIA</h5>
-                                <p class="small text-secondary mb-0">Análisis de oclusión ocular y reflexión
-                                    corneal. Detección de parpadeo errático y anomalías de borde.</p>
-                                <div class="card-progress"></div>
+                <div class="card-main">
+                    <div class="contact-grid">
+                        <div class="flat-card">
+                            <div class="card-icon-box">
+                                <i class="fa-solid fa-envelope"></i>
                             </div>
+                            <h4 class="card-title">Soporte técnico</h4>
+                            <p class="card-desc">¿Tienes un problema con la plataforma? Escríbenos y te ayudamos.</p>
+                            <a href="mailto:support@talos.labs" class="card-action-btn" style="text-decoration:none;">
+                                Enviar mensaje <i class="fa-solid fa-arrow-right"></i>
+                            </a>
                         </div>
-
-                        <!-- Card 02 -->
-                        <div class="col-md-4">
-                            <div class="academy-card h-100">
-                                <div class="card-icon">
-                                    <i class="fa-solid fa-microscope"></i>
-                                </div>
-                                <h6 class="text-success fw-bold uppercase small mb-2">Fundamentos 02</h6>
-                                <h5>FÍSICA DEL SENSOR [PRNU]</h5>
-                                <p class="small text-secondary mb-0">Verificación de huella PRNU y periodicidad FFT.
-                                    Identificación de artefactos de muestreo ausentes.</p>
-                                <div class="card-progress color-2"></div>
+                        <div class="flat-card">
+                            <div class="card-icon-box">
+                                <i class="fa-solid fa-file-contract"></i>
                             </div>
-                        </div>
-
-                        <!-- Card 03 -->
-                        <div class="col-md-4">
-                            <div class="academy-card h-100">
-                                <div class="card-icon">
-                                    <i class="fa-solid fa-wave-square"></i>
-                                </div>
-                                <h6 class="text-success fw-bold uppercase small mb-2">Fundamentos 03</h6>
-                                <h5>ACÚSTICA GENERATIVA</h5>
-                                <p class="small text-secondary mb-0">Estudio de prosodia y micro-variaciones de
-                                    presión. Análisis de artefactos de fase y coherencia.</p>
-                                <div class="card-progress color-3"></div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="mt-4 p-4 border border-info border-opacity-20 rounded shadow-lg"
-                        style="background: rgba(0, 255, 204, 0.03);">
-                        <div class="d-flex align-items-start">
-                            <div class="me-3">
-                                <span class="badge bg-info text-dark fw-bold"
-                                    style="font-size: 0.65rem; letter-spacing: 1px;">ADVERTENCIA</span>
-                            </div>
-                            <p class="small mb-0 text-secondary" style="line-height: 1.6; color: #cbd5e0 !important;">
-                                <strong class="text-info">NOTA DE PROTOCOLO:</strong>
-                                La integridad de los análisis depende de la tasa de bits y resolución de la muestra.
-                                Se recomienda el uso de archivos **Lossless** para obtener una firma PRNU
-                                inequívoca.
+                            <h4 class="card-title">Informe oficial</h4>
+                            <p class="card-desc">¿Necesitas un informe para uso legal o institucional? Podemos ayudarte.
                             </p>
+                            <a href="mailto:legal@talos.labs" class="card-action-btn" style="text-decoration:none;">
+                                Solicitar informe <i class="fa-solid fa-arrow-right"></i>
+                            </a>
+                        </div>
+                        <div class="flat-card">
+                            <div class="card-icon-box">
+                                <i class="fa-solid fa-users"></i>
+                            </div>
+                            <h4 class="card-title">Comunidad</h4>
+                            <p class="card-desc">Únete a nuestra comunidad de usuarios y comparte experiencias.</p>
+                            <a href="#" class="card-action-btn" style="text-decoration:none;">
+                                Unirse <i class="fa-solid fa-arrow-right"></i>
+                            </a>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Panel de Desafío -->
-            <div id="ui-challenge" class="d-none">
-                <header class="text-center mb-3">
-                    <h1 class="cool-title mb-0">TALOS </h1>
-                    <p class="text-info small forensic-subtitle">QUALIFICATION SIMULATOR</p>
-                    <p class="extra-small text-muted mt-1" style="letter-spacing:2px; opacity:0.4;">10 MUESTRAS ·
-                        PROTOCOLO CERTIFICADO</p>
-                </header>
-                <div class="main-container col-lg-12 mx-auto text-center">
-                    <div id="challenge-intro" class="text-start">
-                        <p class="text-secondary mb-4">Esta simulación evalúa tu capacidad para identificar artefactos
-                            de IA en entornos controlados. Deberás analizar muestras visuales y decidir su origen
-                            basándote en anomalías estructurales.</p>
-                        <ul class="text-secondary small mb-4">
-                            <li>Analiza la coherencia de bordes y texturas.</li>
-                            <li>Busca inconsistencias en la iluminación global.</li>
-                            <li>Identifica firmas repetitivas del modelo neuronal.</li>
-                        </ul>
-                        <button class="btn btn-scan w-100" onclick="startChallenge()">INICIAR PROTOCOLO DE
-                            EXAMEN</button>
-                    </div>
-
-                    <div id="challenge-game" class="d-none">
-                        <p class="text-muted small mb-2">MUESTRA <span id="challenge-current">1</span> / 10</p>
-                        <div id="challenge-media" class="mb-4 border border-secondary rounded bg-black">
-                            <!-- Se llena dinámicamente -->
+            <!-- ACADEMY -->
+            <div id="ui-academy" class="d-none">
+                <div class="page-header">
+                    <h1 class="brand-title">TALOS</h1>
+                    <p class="brand-tagline">Aprende a detectar contenido falso</p>
+                </div>
+                <div class="card-main">
+                    <div class="academy-grid">
+                        <div class="flat-card">
+                            <div class="card-icon-box"><i class="fa-solid fa-eye"></i></div>
+                            <h5 class="card-title">Rostros de IA</h5>
+                            <p class="card-desc">La IA suele fallar en detalles anatómicos finos.</p>
+                            <ul class="card-indicators">
+                                <li><i class="fa-solid fa-check"></i> Bordes difusos en orejas</li>
+                                <li><i class="fa-solid fa-check"></i> Falta de reflejos en ojos</li>
+                                <li><i class="fa-solid fa-check"></i> Fondo con formas extrañas</li>
+                            </ul>
                         </div>
+                        <div class="flat-card">
+                            <div class="card-icon-box"><i class="fa-solid fa-microphone"></i></div>
+                            <h5 class="card-title">Voces Sintéticas</h5>
+                            <p class="card-desc">El ritmo natural de la voz es difícil de replicar.</p>
+                            <ul class="card-indicators">
+                                <li><i class="fa-solid fa-check"></i> Falta de respiraciones</li>
+                                <li><i class="fa-solid fa-check"></i> Tono monótono y frío</li>
+                                <li><i class="fa-solid fa-check"></i> Pronunciación perfecta</li>
+                            </ul>
+                        </div>
+                        <div class="flat-card">
+                            <div class="card-icon-box"><i class="fa-solid fa-video"></i></div>
+                            <h5 class="card-title">Deepfakes</h5>
+                            <p class="card-desc">Fíjate en la coherencia visual al mover la cabeza.</p>
+                            <ul class="card-indicators">
+                                <li><i class="fa-solid fa-check"></i> Parpadeo poco natural</li>
+                                <li><i class="fa-solid fa-check"></i> Desfase entre labios y voz</li>
+                                <li><i class="fa-solid fa-check"></i> Sombras que no coinciden</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="academy-note-premium">
+                        <div class="note-icon-glow"><i class="fa-solid fa-lightbulb"></i></div>
+                        <div class="note-content">
+                            <strong>Consejo de Seguridad:</strong> Siempre verifica la fuente original del contenido
+                            antes de compartirlo. Un archivo de mayor resolución permite que los algoritmos de TALOS
+                            detecten anomalías con un 40% más de precisión.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CHALLENGE (hidden, accessible) -->
+            <div id="ui-challenge" class="d-none">
+                <div class="page-header">
+                    <h1 class="brand-title">TALOS</h1>
+                    <p class="brand-tagline">Simulador de detección</p>
+                </div>
+                <div class="card-main text-center">
+                    <div id="challenge-intro">
+                        <p class="text-secondary mb-4">Pon a prueba tu capacidad para distinguir contenido real del
+                            generado por IA.</p>
+                        <button class="btn-analyze" onclick="startChallenge()"><i class="fa-solid fa-play"></i> Comenzar
+                            prueba</button>
+                    </div>
+                    <div id="challenge-game" class="d-none">
+                        <p class="text-muted small mb-2">Muestra <span id="challenge-current">1</span> / 10</p>
+                        <div id="challenge-media" class="mb-4 border border-secondary rounded bg-black"></div>
                         <div id="challenge-buttons" class="d-flex gap-3 justify-content-center">
-                            <button class="btn btn-outline-success px-4" onclick="answerChallenge('REAL')">ES
-                                REAL</button>
-                            <button class="btn btn-outline-danger px-4" onclick="answerChallenge('IA')">ES IA</button>
+                            <button class="btn btn-outline-success px-4" onclick="answerChallenge('REAL')">Es
+                                real</button>
+                            <button class="btn btn-outline-danger px-4" onclick="answerChallenge('IA')">Es
+                                falso</button>
                         </div>
                         <div id="challenge-feedback" class="d-none mt-4">
                             <h4 id="feedback-title" class="mb-2"></h4>
                             <p id="feedback-reason" class="small text-secondary mb-3"></p>
-                            <button class="btn btn-sm btn-info" onclick="nextChallenge()">SIGUIENTE</button>
+                            <button class="btn btn-sm btn-info" onclick="nextChallenge()">Siguiente</button>
                         </div>
                     </div>
-
                     <div id="challenge-result" class="d-none">
-                        <h2 class="mb-2">COMPLETADO</h2>
-                        <p class="h4 mb-4" style="color:rgba(255,255,255,0.7);">Puntuación: <span id="challenge-score"
-                                class="text-info fw-bold">0 / 0</span></p>
-                        <button class="btn btn-outline-light" onclick="resetChallenge()">REINTENTAR PROTOCOLO</button>
+                        <h2 class="mb-2">Completado</h2>
+                        <p class="h4 mb-4">Puntuación: <span id="challenge-score" class="text-info fw-bold">0 / 0</span>
+                        </p>
+                        <button class="btn-analyze" onclick="resetChallenge()"><i class="fa-solid fa-rotate-left"></i>
+                            Intentar de nuevo</button>
                     </div>
                 </div>
             </div>
         </section>
     </div>
 
-    <!-- Modal de Ayuda / Tutorial -->
+    <!-- HELP MODAL -->
     <div class="modal-overlay" id="helpModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <div class="text-start">
-                    <h1 class="cool-title mb-0" style="font-size: 1.5rem;" id="helpTitle">TALOS </h1>
-                </div>
-                <button class="modal-close-btn" id="closeHelp">&times;</button>
+        <div class="modal-box">
+            <div class="modal-box-header">
+                <h2 id="helpTitle">Cómo usar TALOS</h2>
+                <button class="modal-close" id="closeHelp"><i class="fa-solid fa-xmark"></i></button>
             </div>
-
-            <div class="modal-body">
+            <div class="modal-box-body">
                 <div id="help-scanner">
-                    <div class="guide-step">
-                        <h5>SISTEMA DE ANÁLISIS DUAL</h5>
-                        <p>TALOS opera bajo dos protocolos de entrada de evidencia. Para ver el manual específico de
-                            cada uno, entre en el modo correspondiente desde el panel principal.</p>
-                        <ul class="text-secondary small mt-2">
-                            <li><strong>BUFFER LOCAL:</strong> Para archivos cargados desde el almacenamiento del
-                                equipo.</li>
-                            <li><strong>EXTRACCIÓN URL:</strong> Para media alojada en servidores externos (Redes
-                                Sociales).</li>
-                        </ul>
+                    <div class="help-step"><span class="help-num">1</span>
+                        <div><strong>Sube tu archivo</strong>
+                            <p>Haz clic en "Subir archivo" y selecciona una imagen, video o audio desde tu dispositivo.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="help-step"><span class="help-num">2</span>
+                        <div><strong>Presiona "Analizar archivo"</strong>
+                            <p>Espera unos segundos mientras revisamos el contenido.</p>
+                        </div>
+                    </div>
+                    <div class="help-step"><span class="help-num">3</span>
+                        <div><strong>Lee el resultado</strong>
+                            <p>Te diremos si el archivo parece real, falso, o si no estamos seguros.</p>
+                        </div>
                     </div>
                 </div>
-
                 <div id="help-file-scan" class="d-none">
-                    <div class="guide-step">
-                        <h5>01. CARGA DE EVIDENCIA LOCAL</h5>
-                        <p>Arrastre o seleccione archivos en formatos <strong>JPG, PNG, MP4, WAV o MP3</strong>. Se
-                            recomienda media original para validar la firma PRNU.</p>
-                        <ul class="text-secondary small mt-2">
-                            <li><strong>Imágenes:</strong> Análisis de ruido Bayer y coherencia de bordes.</li>
-                            <li><strong>Video:</strong> Evaluación de micro-fluctuaciones musculares y sombras.</li>
-                            <li><strong>Audio:</strong> Verificación de prosodia y artefactos de fase.</li>
-                        </ul>
+                    <div class="help-step"><span class="help-num">1</span>
+                        <div><strong>Elige tu archivo</strong>
+                            <p>Arrastra o selecciona un archivo en formato JPG, PNG, MP4, MP3 o WAV.</p>
+                        </div>
                     </div>
-                    <div class="guide-step">
-                        <h5>02. ANÁLISIS MULTI-CAPA</h5>
-                        <p>El sistema deconstruye la muestra mediante motores Geométricos, de Frecuencia (FFT) y ruido
-                            de hardware.</p>
+                    <div class="help-step"><span class="help-num">2</span>
+                        <div><strong>Haz clic en "Analizar archivo"</strong>
+                            <p>El tiempo del analisis dependera del tamaño del archivo.</p>
+                        </div>
                     </div>
-                    <div class="guide-step">
-                        <h5>03. VEREDICTO FINAL</h5>
-                        <p>Interpretación de resultados según el porcentaje de confianza neuronal (Real < 40% | IA>
-                                70%).</p>
+                    <div class="help-step"><span class="help-num">3</span>
+                        <div><strong>Revisa el resultado</strong>
+                            <p>Verde = parece seguro · Amarillo = dudoso · Rojo = posiblemente falso.</p>
+                        </div>
                     </div>
                 </div>
-
                 <div id="help-url-scan" class="d-none">
-                    <div class="guide-step">
-                        <h5>01. PROTOCOLO DE EXTRACCIÓN URL</h5>
-                        <p>Pegue el enlace de <strong>TikTok, YouTube, Instagram o X</strong>. TALOS extraerá la media
-                            mediante protocolos cifrados.</p>
-                        <ul class="text-secondary small mt-2">
-                            <li><strong>Smart Preview:</strong> Ficha técnica automática antes del procesamiento.</li>
-                            <li><strong>Bypass de Compresión:</strong> Acceso a la media con menor degradación digital
-                                posible.</li>
-                            <li><strong>Limpieza de Buffer:</strong> La URL se purga tras el análisis por seguridad.
-                            </li>
-                        </ul>
+                    <div class="help-step"><span class="help-num">1</span>
+                        <div><strong>Copia el enlace</strong>
+                            <p>Copia la URL del video o imagen de TikTok, YouTube, Instagram u otra red.</p>
+                        </div>
                     </div>
-                    <div class="guide-step">
-                        <h5>02. ANÁLISIS MULTI-CAPA</h5>
-                        <p>Evaluación de artefactos de compresión específicos de la plataforma frente a trazas de
-                            generación IA.</p>
+                    <div class="help-step"><span class="help-num">2</span>
+                        <div><strong>Pégalo en el campo</strong>
+                            <p>Pega el enlace y haz clic en "Analizar enlace".</p>
+                        </div>
                     </div>
-                    <div class="guide-step">
-                        <h5>03. VEREDICTO FINAL</h5>
-                        <p>Veredicto ajustado según la pérdida de datos inherente al host externo.</p>
+                    <div class="help-step"><span class="help-num">3</span>
+                        <div><strong>Espera el resultado</strong>
+                            <p>Descargamos el contenido automáticamente y lo revisamos por ti.</p>
+                        </div>
                     </div>
                 </div>
-
                 <div id="help-database" class="d-none">
-                    <div class="guide-step">
-                        <h5>ALMACENAMIENTO DE EVIDENCIA</h5>
-                        <p>TALOS utiliza un sistema de persistencia local indexado (LocalDB). Esto significa que tus
-                            análisis <strong>nunca abandonan tu ordenador</strong>. La privacidad es total y absoluta
-                            por diseño.</p>
+                    <div class="help-step"><span class="help-num">ℹ</span>
+                        <div><strong>Tu historial es privado</strong>
+                            <p>Todos tus análisis se guardan solo en tu dispositivo. Nadie más puede verlos.</p>
+                        </div>
                     </div>
-                    <div class="guide-step">
-                        <h5>INTEGRIDAD DE LOS REGISTROS</h5>
-                        <p>Los registros incluyen la fecha exacta y los metadatos de la sesión. Si borras el historial
-                            mediante la opción "PURGAR", los datos se eliminan del buffer de memoria del navegador y no
-                            podrán ser recuperados.</p>
+                    <div class="help-step"><span class="help-num">ℹ</span>
+                        <div><strong>Generar reporte</strong>
+                            <p>Puedes descargar un informe PDF de cualquier análisis guardado.</p>
+                        </div>
                     </div>
                 </div>
-
                 <div id="help-contact" class="d-none">
-                    <div class="guide-step">
-                        <h5>CANALES DE COMUNICACIÓN SEGURA</h5>
-                        <p>El Centro de Control opera bajo protocolos de encriptación AES-256. Utiliza el canal de
-                            **Soporte Técnico** para incidencias de plataforma y el de **Peritaje Legal** para solicitar
-                            informes certificados con validez jurídica.</p>
-                    </div>
-                    <div class="guide-step">
-                        <h5>COMUNIDAD TALOS</h5>
-                        <p>El acceso al "Hilo Forense" es restringido. Se requiere una validación de identidad para
-                            participar en el intercambio de firmas de IA avanzadas y modelos de difusión experimentales.
-                        </p>
+                    <div class="help-step"><span class="help-num">ℹ</span>
+                        <div><strong>Estamos aquí para ayudarte</strong>
+                            <p>Si tienes dudas, errores o necesitas un informe oficial, escríbenos.</p>
+                        </div>
                     </div>
                 </div>
-
                 <div id="help-academy" class="d-none">
-                    <div class="guide-step">
-                        <h5>PROGRAMA DE FORMACIÓN CONTINUA</h5>
-                        <p>La Academy es un hub de conocimiento diseñado para entrenar el ojo humano en la detección de
-                            artefactos que los algoritmos podrían pasar por alto. Cubre desde biometría hasta física de
-                            sensores.</p>
-                    </div>
-                    <div class="guide-step">
-                        <h5>ACTUALIZACIÓN DE FIRMAS</h5>
-                        <p>Los módulos se actualizan mensualmente con las últimas técnicas de generación (Sora, Flux,
-                            ElevenLabs V3). Completa las lecturas para mejorar tu ratio de éxito en el simulador.</p>
+                    <div class="help-step"><span class="help-num">ℹ</span>
+                        <div><strong>Aprende a detectar</strong>
+                            <p>Esta sección te enseña señales comunes de contenido falso para que puedas identificarlos
+                                tú mismo.</p>
+                        </div>
                     </div>
                 </div>
-
                 <div id="help-challenge" class="d-none">
-                    <div class="guide-step">
-                        <h5>SIMULADOR DE CALIFICACIÓN</h5>
-                        <p>Este examen evalúa tu capacidad de análisis crítico. No utilices herramientas externas;
-                            confía en tu entrenamiento para identificar inconsistencias estructurales en las fuentes
-                            multimedia.</p>
-                    </div>
-                    <div class="guide-step">
-                        <h5>CRITERIOS DE RANGO</h5>
-                        <p>Para obtener la certificación de "Experto Forense", debes lograr un 10/10 en el análisis de
-                            10 muestras consecutivas. Un fallo de detección compromete la validez de la sesión.</p>
+                    <div class="help-step"><span class="help-num">ℹ</span>
+                        <div><strong>Simulador de práctica</strong>
+                            <p>Analiza muestras y decide si son reales o falsas. Pon a prueba tu ojo.</p>
+                        </div>
                     </div>
                 </div>
-
-                <button class="btn btn-scan w-100 mt-4" onclick="toggleModal(false)">ENTENDIDO</button>
+                <button class="btn-analyze mt-4 w-100" onclick="toggleModal(false)">Entendido</button>
             </div>
-            <!-- Footer eliminado por petición de usuario -->
         </div>
     </div>
 
-    <!-- Footer Técnico (Status Bar) -->
-    <footer class="tech-footer">
-        <div class="footer-segment">
-            <span class="segment-label">SYSTEM_TIME:</span>
-            <span id="footer-clock">00:00:00.000</span>
+    <!-- CONFIRM MODAL -->
+    <div id="confirmModal" class="modal-overlay">
+        <div class="modal-box" style="max-width:460px;">
+            <div class="modal-box-header">
+                <h2 class="text-warning"><i class="fa-solid fa-triangle-exclamation me-2"></i>¿Salir de la prueba?</h2>
+                <button class="modal-close" onclick="closeConfirmModal()"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-box-body text-center">
+                <p class="text-secondary mb-4">Si sales ahora, perderás tu progreso actual en la prueba.</p>
+                <div class="d-flex gap-3 justify-content-center">
+                    <button class="btn btn-outline-secondary px-4" onclick="closeConfirmModal()">Cancelar</button>
+                    <button class="btn btn-danger px-4" id="btnConfirmExit">Sí, salir</button>
+                </div>
+            </div>
         </div>
-        <div class="footer-segment d-none d-md-flex">
-            <span class="segment-label">SECURE_TUNNEL:</span>
-            <span class="text-success blink-fast">AES-256_ACTIVE</span>
-        </div>
-        <div class="footer-segment d-none d-lg-flex">
-            <span class="segment-label">NODE_LOG:</span>
-            <span class="ticker-text" id="footer-ticker">SISTEMA INICIALIZADO... ESPERANDO BUFFER</span>
-        </div>
-        <div class="footer-segment ms-auto">
-            <span class="segment-label">AUTH:</span>
-            <span class="text-info">TALOS_ADMIN_V10.3</span>
-        </div>
-    </footer>
+    </div>
 
-    <!-- Scripts Externos -->
 </body>
 
 </html>

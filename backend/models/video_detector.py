@@ -73,16 +73,16 @@ class PipelineConfig:
     Usar dataclass permite validación, repr limpio y serialización.
     """
     # Extracción de frames
-    # [OPT V10.3] 48 frames es más que suficiente para deepfake detection.
-    # Los modelos de IA dejan artefactos en cada frame — no es necesario analizar 80.
-    max_frames:         int   = 48
-    target_fps_sample:  float = 2.0   # [OPT] Menos muestreo = menos I/O
-    max_video_duration: float = 60.0  # [OPT] 60s — los patrones de deepfake se detectan en el primer minuto
+    # [OPT V10.3] 24 frames es más que suficiente para deepfake detection veloz.
+    # Los modelos de IA dejan artefactos en cada frame — no es necesario analizar 80 o 48.
+    max_frames:         int   = 24
+    target_fps_sample:  float = 1.0   # [OPT] Menos muestreo = menos I/O y más velocidad
+    max_video_duration: float = 30.0  # [OPT] 30s — los patrones de deepfake se detectan en los primeros segundos
 
     # GPU / Inferencia
     use_gpu:            bool  = True
     gpu_device_id:      int   = 0
-    batch_size:         int   = 24    # [OPT] Batch más grande = menos forward passes
+    batch_size:         int   = 24    # [OPT] Batch = max_frames, procesamos todo en un solo pase de GPU
 
     # Timeouts por módulo — reducidos 50% manteniendo margen de seguridad
     # [OPT V10.3] Todos los módulos locales suelen terminar en <20s.
@@ -694,26 +694,21 @@ class VideoIADetectorV5:
                 any_veto_active = hive_veto_active or audio_veto_active
 
                 # Refuerzos para videos IA - V9.2 (balance óptimo)
-                if blinks > 85:
+                if blinks > 85 and not any_veto_active:
                     prob = max(prob, 96.0)
                     sota_notes.append("Refuerzo V10: Incoherencia estructural extrema")
 
                 # Señal fuerte: vit_p90 muy alto + facial bajo (no hay rostro humano claro)
-                # [FIX] Solo aplica si ningún veto está activo
                 if facial_s < 15 and vit_mean > 0.75 and vit_p90 > 0.85 and not any_veto_active:
                     prob = max(prob, 93.0)
                     sota_notes.append("Refuerzo V9: Confianza neuronal alta sin rostro claro")
 
                 # Señal media: vit medio-alto + jacobian alto
-                # [FIX] Umbral jacobian subido 0.45 → 0.55 para evitar falsas alarmas
-                # en videos recomprimidos por yt-dlp. Con veto Hive.
                 if jacob > 0.55 and vit_mean > 0.70 and not any_veto_active:
                     prob = max(prob, 88.0)
                     sota_notes.append("Refuerzo V9: Incoherencia física + señal neuronal")
 
                 # Señal específica: facial asymmetry muy baja (deepfake clásico)
-                # [FIX] Guard: facial_asym_std > 0 para no disparar cuando NO se detectó cara.
-                # [FIX] Guard: Hive veto para no inflar falsamente cuando Hive dice REAL.
                 if (facial_s < 25
                         and facial_asym_std > 0.0
                         and facial_asym_std < 0.015
@@ -721,47 +716,6 @@ class VideoIADetectorV5:
                         and not any_veto_active):
                     prob = max(prob, 90.0)
                     sota_notes.append("Refuerzo V9: Simetría facial anómala")
-
-                # ── VETO CAP ESCALONADO [FIX V10.3] ──────────────────────────
-                # El cap depende de qué señales confirman que el video es real:
-                #
-                # Tier 1 — Hive + Audio ambos dicen REAL:  cap → 30% (REAL fuerte)
-                # Tier 2 — Solo Hive dice REAL (<15%):     cap → 38% (REAL)
-                # Tier 3 — Solo Audio dice REAL (<25%):    cap → 55% (INCIERTO bajo)
-                # Tier 4 — Solo Audio dice REAL (<30%):    cap → 60% (INCIERTO, conservador)
-                #
-                # Razonamiento: Hive es el más confiable.
-                # Si Hive dice 14%, el video ES real y debemos decir REAL, no INCIERTO.
-                # Si solo tenemos audio (Hive con rate-limit), somos más conservadores.
-                if any_veto_active:
-                    audio_prob_val = float(audio_prob_for_veto) if audio_prob_for_veto is not None else 100.0
-
-                    if hive_veto_active and audio_veto_active:
-                        # Doble confirmación: Hive + Audio → REAL fuerte
-                        cap = 30.0
-                        veto_reason = f"Hive={hive_prob:.1f}% + Audio={audio_prob_val:.1f}% — Doble confirmación orgánica"
-                    elif hive_veto_active:
-                        # Solo Hive confirma real
-                        if hive_prob < 10.0:
-                            cap = 30.0
-                            veto_reason = f"Hive={hive_prob:.1f}% — Alta certeza orgánica"
-                        else:
-                            cap = 38.0
-                            veto_reason = f"Hive={hive_prob:.1f}% — Señal orgánica confirmada"
-                    else:
-                        # Solo Audio (Hive no disponible) → conservador
-                        if audio_prob_val < 25.0:
-                            cap = 55.0
-                            veto_reason = f"Audio={audio_prob_val:.1f}% — Voz humana detectada (Hive no disponible)"
-                        else:
-                            cap = 60.0
-                            veto_reason = f"Audio={audio_prob_val:.1f}% — Señal orgánica parcial (Hive no disponible)"
-
-                    if prob > cap:
-                        prob = cap
-                        sota_notes.append(
-                            f"Veto V10.3: Score capado a {cap:.0f}% ({veto_reason})"
-                        )
 
                 # Rescate para videos REALES con alta calidad cinemática
                 if jacob < 0.30 and vit_mean > 0.75 and prob < 80:
@@ -772,21 +726,74 @@ class VideoIADetectorV5:
                     prob = max(prob, 94.0)
                     sota_notes.append("Refuerzo SOTA V7: Incoherencia física extrema")
 
+                # ── HARD OVERRIDES [FIX V10.3] ──────────────────────────────
+                # Estas señales son binarias y muy fuertes, pero si Hive dice REAL
+                # bajamos su peso para evitar falsos positivos por ruido.
                 audio_data_res = module_results.get("audio", {})
                 if isinstance(audio_data_res, dict):
                     synth_score_str = audio_data_res.get("sota_info", {}).get("detalles", {}).get("metricas_avanzadas", {}).get("synthid_watermark", "0.0%")
-                    synth_val = float(str(synth_score_str).replace("%", ""))
+                    try:
+                        synth_val = float(str(synth_score_str).replace("%", ""))
+                    except:
+                        synth_val = 0.0
+                        
                     if synth_val > 70:
-                        prob = max(prob, 98.0)
-                        sota_notes.append(f"Hard Override V10: Firma SynthID de Google detectada ({synth_val}%)")
+                        if any_veto_active:
+                            # Si hay veto, no usamos el override al 98%, solo subimos un poco
+                            prob = max(prob, 65.0) 
+                            sota_notes.append(f"Alerta: Firma SynthID detectada ({synth_val}%) pero mitigada por señal orgánica")
+                        else:
+                            prob = max(prob, 98.0)
+                            sota_notes.append(f"Hard Override V10: Firma SynthID de Google detectada ({synth_val}%)")
 
-                if vit_mean > 0.60:
+                if vit_mean > 0.60 and not any_veto_active:
+                    # Detección de patrones de generadores SOTA (Google Veo / Sora)
                     if audio_data_res.get("sota_info", {}).get("probabilidad", 0) > 80:
                         prob = max(prob, 99.0)
                         sota_notes.append("Hard Override V10: Patrón estructural de Google Veo detectado")
 
+                # ── VETO CAP ESCALONADO [FIX V10.3] ──────────────────────────
+                # El cap depende de qué señales confirman que el video es real:
+                if any_veto_active:
+                    audio_prob_val = float(audio_prob_for_veto) if audio_prob_for_veto is not None else 100.0
+
+                    if hive_veto_active and audio_veto_active:
+                        # Doble confirmación: Hive + Audio → REAL firme
+                        cap = 40.0
+                        veto_reason = f"Hive={hive_prob:.1f}% + Audio={audio_prob_val:.1f}% — Doble confirmación orgánica"
+                    elif hive_veto_active:
+                        # Solo Hive confirma real
+                        if hive_prob < 5.0:
+                            cap = 42.0
+                            veto_reason = f"Hive={hive_prob:.1f}% — Alta certeza orgánica"
+                        else:
+                            cap = 48.0
+                            veto_reason = f"Hive={hive_prob:.1f}% — Señal orgánica detectada"
+                    else:
+                        # Solo Audio (Hive no disponible) → conservador
+                        if audio_prob_val < 25.0:
+                            cap = 55.0
+                            veto_reason = f"Audio={audio_prob_val:.1f}% — Voz humana detectada (Hive no disponible)"
+                        else:
+                            cap = 62.0
+                            veto_reason = f"Audio={audio_prob_val:.1f}% — Señal orgánica parcial (Hive no disponible)"
+
+                    # [FIX V10.4] No aplicamos el veto si la sospecha interna es extrema (>85)
+                    # o si ya tenemos un refuerzo SOTA activo.
+                    if prob > cap and prob < 85:
+                        prob = cap
+                        sota_notes.append(
+                            f"Veto V10.4: Score atenuado a {cap:.0f}% ({veto_reason})"
+                        )
+                    elif prob >= 85 and any_veto_active:
+                         sota_notes.append(
+                            f"Aviso: Señal orgánica ({veto_reason}) detectada pero ignorada por alta sospecha estructural"
+                         )
+
                 score_result["probability"] = round(float(prob), 1)
-                score_result["verdict"] = "IA" if prob >= 50 else "REAL"
+                if prob >= 60: score_result["verdict"] = "IA"
+                elif prob > 40: score_result["verdict"] = "INCIERTO"
+                else: score_result["verdict"] = "REAL"
 
                 t_elapsed = round(time.monotonic() - t_start, 2)
                 audio_nota = audio_data_res.get("sota_info", {}).get("nota", "")

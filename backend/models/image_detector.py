@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore")
 import os
 os.environ["HF_HUB_READ_TIMEOUT"] = "60"  # [PROD] V10.3: Aumentar timeout para evitar crash en arranque
 os.environ["TRANSFORMERS_OFFLINE"] = "0"   # Permitir descarga si es necesario, pero priorizar cache
-logger = logging.getLogger("NueroscanV10")
+logger = logging.getLogger("TalosV10")
 
 # Silenciar logs ruidosos de bibliotecas externas
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -1954,7 +1954,7 @@ def _build_evidence_block(
     # Nivel de evidencia basado en probabilidad
     if prob >= 75:
         level = "high"
-    elif prob >= 45:
+    elif prob >= 40:
         level = "medium"
     elif prob >= 20:
         level = "low"
@@ -2099,8 +2099,8 @@ def _weighted_ensemble(
 
         # PISO GARANTIZADO: Grok sin EXIF con alta confianza no puede ser
         # arrastrado por debajo del umbral de detección por un Meta bajo,
-        # A MENOS que Meta tenga pruebas físicas orgánicas concluyentes (< 45%).
-        if meta_prob >= 45.0:
+        # A MENOS que Meta tenga pruebas físicas orgánicas concluyentes (< 40%).
+        if meta_prob >= 40.0:
             if grok_prob >= 60.0 and n_forensic >= 9:
                 # Alta confianza Grok con múltiples señales (mínimo 9) → prevalece
                 combined = max(combined, grok_prob)
@@ -2122,7 +2122,7 @@ def _weighted_ensemble(
         if is_social and not has_confirm_ai and combined > 55:
             # Si no hay pruebas deterministas (metadata o fingerprint extremo),
             # capamos la probabilidad para evitar el falso veredicto IA.
-            limit = 59.0 # Justo por debajo del umbral IA
+            limit = 40.0 # Justo por debajo del umbral INCIERTO de routes_analyze (41%)
             if combined > limit:
                 # Solo bajamos si MetaProb no es extremadamente alta (>80)
                 if meta_prob < 80.0:
@@ -2138,9 +2138,9 @@ def _weighted_ensemble(
 
 
 # ═══════════════════════════════════════════════════════════════
-# MOTOR NUEROSCAN V10.2
+# MOTOR TALOS V10.2
 # ═══════════════════════════════════════════════════════════════
-class NueroscanEngineV9:
+class TalosEngineV9:
 
     def __init__(self, config: Optional[ThresholdConfig] = None):
         self.device      = 0 if torch.cuda.is_available() else -1
@@ -2264,7 +2264,7 @@ class NueroscanEngineV9:
         return float(sum(weighted_scores) / sum(weights))
 
     def _hybrid_env_enabled(self) -> bool:
-        return os.getenv("NUEROSCAN_HYBRID_IMAGE", "1").strip().lower() not in ("0", "false", "no")
+        return os.getenv("TALOS_HYBRID_IMAGE", "1").strip().lower() not in ("0", "false", "no")
 
     def _ensure_hybrid(self) -> None:
         if not self._threshold_cfg.enable_hybrid_image_branch or not self._hybrid_env_enabled():
@@ -2361,7 +2361,7 @@ class NueroscanEngineV9:
         except Exception as e:
             raise ValueError(f"No se pudo leer la imagen: {e}") from e
 
-    def process_image(self, data: bytes, verbose: bool = False) -> Dict[str, Any]:
+    def process_image(self, data: bytes, verbose: bool = False, is_social_media: bool = False) -> Dict[str, Any]:
         try:
             self._validate_input(data)
 
@@ -2422,6 +2422,10 @@ class NueroscanEngineV9:
                 nn_prob_legacy = f_neural.result()
                 hybrid_res = f_hybrid.result() # Ahora es un dict
                 metadata = f_metadata.result()
+                if is_social_media:
+                    metadata["is_social_media"] = True
+                    if "Origen detectado: URL de red social" not in metadata["signals"]:
+                        metadata["signals"].append("Origen detectado: URL de red social")
                 ela = f_ela.result()
                 hive_res = f_hive.result()
 
@@ -2450,13 +2454,26 @@ class NueroscanEngineV9:
                 print(f"   >>> [HIVE SCAN] Sospecha: {hive_prob:.1f}% | Generador: {hive_suspect}")
                 
                 if hive_prob > 60:
-                    # Nudge agresivo: Hive domina si detecta IA clara
-                    prob = max(prob, hive_prob * 0.9 + prob * 0.1)
-                    reasons.append(f"Confirmado por The Hive: Alta sospecha de {hive_suspect.upper()} ({hive_prob:.1f}%)")
+                    # Nudge ultra-agresivo: Hive domina casi totalmente si detecta IA clara
+                    prob = max(prob, hive_prob * 0.95 + prob * 0.05)
+                    reasons.append(f"Validado por The Hive (SOTA): Alta sospecha de {hive_suspect.upper()} ({hive_prob:.1f}%)")
                     metadata["generator"] = metadata.get("generator") or f"Detectado por Hive ({hive_suspect})"
-                elif hive_prob > 40:
-                    prob = max(prob, (prob + hive_prob) / 2)
-                    reasons.append(f"Señal Hive: Patrón sospechoso de {hive_suspect.upper()} ({hive_prob:.1f}%)")
+                elif hive_prob > 35: 
+                    prob = max(prob, (prob * 0.4 + hive_prob * 0.6))
+                    reasons.append(f"Señal prioritaria Hive: Patrón sospechoso de {hive_suspect.upper()} ({hive_prob:.1f}%)")
+                elif hive_prob < 15 and hive_res.get("available"):
+                    # ── HIVE VETO [V10.4] ────────────────────────────────────
+                    # Si Hive dice REAL con alta confianza, desconfiamos de los falsos
+                    # positivos de nuestros motores internos (especialmente Grok).
+                    if prob > 40:
+                        # Si es social media o no hay EXIF, el veto es casi total
+                        if metadata.get("is_social_media") or not metadata.get("has_exif"):
+                            prob = min(prob, 40.0) # Forzamos a zona REAL
+                            reasons.append(f"Veto Orgánico Hive: Confirmación SOTA de autenticidad ({hive_prob:.1f}%)")
+                        else:
+                            # En otros casos, solo promediamos a la baja
+                            prob = (prob + hive_prob) / 2
+                            reasons.append(f"Atenuación Hive: Baja sospecha en motor externo ({hive_prob:.1f}%)")
 
             # ── MEJORA 2: Clasificador Grok + Ensamble Ponderado ──────────
             grok_prob, grok_signals = GrokClassifier.classify(
@@ -2496,6 +2513,15 @@ class NueroscanEngineV9:
                         f"Híbrido tardío REAL (w={h_w_soft:.2f}, p={hybrid_res['prob_ai']:.2f}): "
                         f"{int(prob_before_hybrid_nudge)}% → {int(prob)}%"
                     )
+
+            # ── HIVE MASTER VETO [V10.4] ──────────────────────────────────────
+            # Si The Hive (SOTA) dice REAL con < 5% de sospecha, forzamos REAL 
+            # a menos que haya una firma de metadatos o generador confirmada.
+            if hive_res.get("available") and hive_prob < 5.0 and not metadata.get("confirmed_ai"):
+                if prob > 40:
+                    old_p = prob
+                    prob = min(prob, 35.0)
+                    reasons.append(f"🏆 Veredicto Maestro Hive SOTA: Falso positivo interno corregido ({int(old_p)}% -> {int(prob)}%)")
 
             # Recalcular veredicto con probabilidad del ensamble (Estándar Pulzo)
             cfg = self.meta_classifier.cfg
@@ -2542,6 +2568,15 @@ class NueroscanEngineV9:
                 "confidence":   conf_str,
                 "nota":         " | ".join(reasons),
                 "reasons":      reasons,
+                "module_scores": {
+                    "Neural CNN": f"{int(nn_prob)}%",
+                    "Neural ViT (Hybrid)": f"{int(hybrid_pct)}%" if hybrid_pct is not None else "N/A",
+                    "Grok Heuristics": f"{int(grok_prob)}%",
+                    "Meta Ensemble": f"{int(meta_prob_raw)}%",
+                    "The Hive (SOTA)": f"{int(hive_prob)}%" if 'hive_prob' in locals() and hive_res.get('available') else "N/A",
+                    "Fingerprint Spectral": f"{int(fingerprint.get('top_score', 0.0))}%" if fingerprint else "N/A",
+                    "ELA Anomaly": f"{int(ela_public.get('score_ia', 0.0))}%" if ela_public else "N/A"
+                },
                 # ── MEJORA 3: Bloque para el usuario final ────────────────
                 "evidence":     evidence,
                 "semantico": {
@@ -2632,7 +2667,7 @@ class NueroscanEngineV9:
 # ═══════════════════════════════════════════════════════════════
 # SINGLETON CON DOUBLE-CHECKED LOCKING
 # ═══════════════════════════════════════════════════════════════
-_engine: Optional[NueroscanEngineV9] = None
+_engine: Optional[TalosEngineV9] = None
 _engine_lock = Lock()
 
 
@@ -2643,16 +2678,16 @@ def reset_image_engine() -> None:
         _engine = None
 
 
-def get_engine(config: Optional[ThresholdConfig] = None) -> NueroscanEngineV9:
+def get_engine(config: Optional[ThresholdConfig] = None) -> TalosEngineV9:
     global _engine
     if _engine is None:
         with _engine_lock:
             if _engine is None:
-                _engine = NueroscanEngineV9(config)
+                _engine = TalosEngineV9(config)
     return _engine
 
 
-def analyze_image(image_bytes: bytes, verbose: bool = False) -> Dict[str, Any]:
+def analyze_image(image_bytes: bytes, verbose: bool = False, is_social_media: bool = False) -> Dict[str, Any]:
     """Helper wrapper compatible con el router V4.1."""
-    return get_engine().process_image(image_bytes, verbose=verbose)
+    return get_engine().process_image(image_bytes, verbose=verbose, is_social_media=is_social_media)
                                                    
